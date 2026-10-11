@@ -36,6 +36,7 @@ import json
 import random
 import re
 import string
+import threading
 import sys
 from pathlib import Path
 from typing import Any
@@ -218,9 +219,171 @@ def harvest(template: str, want: int, min_grade: str = "B", target_country: str 
     return good, report
 
 
+# --- ghim vùng exit theo bang / thành phố ---------------------------------
+# Provider dạng arxlabs nhận chỉ định vùng ngay trong username:
+#   zvwg1194951-region-IN-st-Bihar-city-Aurangabad-sid-XXXX-t-5
+# Danh sách dưới đây là những thành phố xuất hiện trong mẫu trích xuất mã ₹0
+# THÀNH CÔNG (phân tích log lịch sử). Đây KHÔNG phải bằng chứng nhân quả — coi như
+# giả thuyết để chạy thử rồi đo lại tỉ lệ thật.
+SUCCESS_CITY_PRESET: tuple[tuple[str, str], ...] = (
+    ("Telangana", "Hyderabad"),
+    ("Tamil Nadu", "Chennai"),
+    ("Karnataka", "Bengaluru"),
+    ("West Bengal", "Kolkata"),
+    ("Delhi", "New Delhi"),
+    ("Maharashtra", "Mumbai"),
+)
+_REGION_KEYS = ("st", "state", "city")
+
+
+def _region_token(value: str) -> str:
+    """Provider NHẬN dấu cách trong tên bang: `-st-Andhra Pradesh-city-Gudlavalleru-`.
+
+    Trước đây tôi xoá dấu cách ('AndhraPradesh') nên các bang nhiều từ không bao giờ
+    khớp, proxy rơi về IP ngẫu nhiên — đo được: TamilNadu/WestBengal sai 100%.
+    Chỉ cắt khoảng trắng thừa ở hai đầu và gộp nhiều khoảng trắng thành một.
+    """
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def set_region(line: str, *, state: str = "", city: str = "", country: str = "") -> str:
+    """Ghim bang/thành phố vào username; bỏ tham số vùng cũ nếu đã có."""
+    host, port, user, pw = split_proxy(line)
+    tokens = user.split("-")
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i].lower()
+        if tok in _REGION_KEYS and i + 1 < len(tokens):
+            i += 2                      # bỏ cặp -st-<cũ> / -city-<cũ>
+            continue
+        if country and tok == "region" and i + 1 < len(tokens):
+            out += [tokens[i], country]
+            i += 2
+            continue
+        out.append(tokens[i])
+        i += 1
+    pos = 0
+    for j, tok in enumerate(out):
+        if tok.lower() == "region" and j + 1 < len(out):
+            pos = j + 2                 # chèn ngay sau region-XX
+            break
+    ins: list[str] = []
+    if _region_token(state):
+        ins += ["st", _region_token(state)]
+    if _region_token(city):
+        ins += ["city", _region_token(city)]
+    out[pos:pos] = ins
+    return build_proxy(host, port, "-".join(out), pw)
+
+
+def regions_from_args(state: str, city: str, preset: str) -> list[tuple[str, str]]:
+    """Danh sách (bang, thành phố) cần sinh."""
+    if preset:
+        if preset != "success6":
+            raise ValueError("preset không hợp lệ: chỉ có 'success6'")
+        return list(SUCCESS_CITY_PRESET)
+    if state or city:
+        return [(state, city)]
+    raise ValueError("cần --state/--city hoặc --preset success6")
+
+
+def mask_proxy(line: str) -> str:
+    """Che mật khẩu khi in ra màn hình."""
+    try:
+        host, port, user, pw = split_proxy(line)
+    except ValueError:
+        return line
+    return f"{host}:{port}:{user}:***"
+
+
+def to_colon_form(line: str) -> str:
+    """Đổi `http://user:pass@host:port` về `host:port:user:pass` (dạng proxy.txt)."""
+    host, port, user, pw = split_proxy(line)
+    return f"{host}:{port}:{user}:{pw}"
+
+
+# --- lọc pool theo vùng exit THẬT -----------------------------------------
+# Tham số -st-/-city- của provider chỉ là GỢI Ý: đo 13 proxy thì chỉ 4 cái ra đúng
+# vùng (31%), có cái còn ra IP Pakistan. Nên muốn chắc thì phải dò IP exit thật rồi
+# chỉ giữ cái đúng vùng.
+_REGION_IN_USER = re.compile(r"(?i)-st-([A-Za-z0-9]+)-city-([A-Za-z0-9]+)")
+
+
+def wanted_region(line: str) -> tuple[str, str]:
+    """Đọc (bang, thành phố) đã yêu cầu trong username. ('', '') nếu không có."""
+    try:
+        _, _, user, _ = split_proxy(line)
+    except ValueError:
+        return "", ""
+    m = _REGION_IN_USER.search(user)
+    return (m.group(1), m.group(2)) if m else ("", "")
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z]", "", str(text or "").lower())
+
+
+def probe_exit_geo(line: str, timeout: int = 20) -> dict:
+    """Dò vị trí IP exit của 1 proxy. {'ok': False, ...} nếu không gọi được."""
+    try:
+        import requests
+    except ImportError:
+        return {"ok": False, "error": "no requests"}
+    try:
+        host, port, user, pw = split_proxy(line)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    url = f"http://{quote(user, safe='-_.~')}:{quote(pw, safe='-_.~')}@{host}:{port}"
+    try:
+        r = requests.get("https://ipwho.is/", proxies={"http": url, "https": url}, timeout=timeout)
+        d = r.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:120]}
+    if not isinstance(d, dict) or not d.get("success"):
+        return {"ok": False, "error": str(d)[:120]}
+    return {"ok": True, "ip": d.get("ip"), "country": d.get("country_code"),
+            "region": d.get("region"), "city": d.get("city")}
+
+
+def verify_region(lines: list[str], want: int = 0, workers: int = 8,
+                  timeout: int = 20) -> tuple[list[str], dict]:
+    """Giữ lại proxy có exit ĐÚNG vùng ghi trong username (quốc gia phải là target)."""
+    from concurrent.futures import ThreadPoolExecutor
+    keep: list[str] = []
+    stats = {"checked": 0, "match": 0, "wrong_region": 0, "wrong_country": 0, "error": 0}
+    lock = threading.Lock()
+
+    def one(line: str) -> None:
+        st, ct = wanted_region(line)
+        if not st and not ct:
+            with lock:
+                stats["error"] += 1
+            return
+        geo = probe_exit_geo(line, timeout)
+        with lock:
+            stats["checked"] += 1
+            if not geo.get("ok"):
+                stats["error"] += 1
+                return
+            if geo.get("country") != "IN":
+                stats["wrong_country"] += 1
+                return
+            if (_norm(geo.get("region")) == _norm(st)) or (_norm(geo.get("city")) == _norm(ct)):
+                stats["match"] += 1
+                if not want or len(keep) < want:
+                    keep.append(line)
+            else:
+                stats["wrong_region"] += 1
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        list(ex.map(one, lines))
+    return keep, stats
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sinh proxy mới từ 1 dòng mẫu + đo chất lượng")
-    parser.add_argument("cmd", choices=["harvest", "generate", "detect"])
+    parser.add_argument("cmd", choices=["harvest", "generate", "detect", "region", "verify"])
     parser.add_argument("--template", default="", help="dòng proxy mẫu (host:port:user:pass)")
     parser.add_argument("--from-file", default="", help="lấy dòng đầu của file làm mẫu")
     parser.add_argument("--want", type=int, default=20, help="cần bao nhiêu proxy đạt chuẩn")
@@ -235,6 +398,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--out", default="", help="ghi proxy đạt chuẩn ra file")
     parser.add_argument("--json", default="", help="ghi kết quả đầy đủ ra file JSON")
+    parser.add_argument("--state", default="", help="region: bang, vd Telangana")
+    parser.add_argument("--city", default="", help="region: thành phố, vd Hyderabad")
+    parser.add_argument("--preset", default="", help="region: success6 = 6 thành phố trong mẫu mã ₹0 thành công")
+    parser.add_argument("--per-city", type=int, default=0, help="region: số proxy mỗi vùng (mặc định = --count)")
     args = parser.parse_args(argv)
 
     template = args.template or (template_from_file(args.from_file) if args.from_file else "")
@@ -252,6 +419,39 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "generate":
         for line in generate(template, args.count):
             print(line)
+        return 0
+
+    if args.cmd == "verify":
+        src = args.from_file or args.template
+        lines = ([l.strip() for l in Path(src).read_text(encoding="utf-8", errors="ignore").splitlines()
+                  if l.strip() and not l.startswith("#")] if args.from_file else [src])
+        keep, stats = verify_region(lines, args.want, args.workers, args.timeout)
+        if args.out:
+            Path(args.out).write_text("\n".join(keep) + "\n", encoding="utf-8")
+        print(json.dumps({"kept": len(keep), **stats, "out": args.out or None}, ensure_ascii=False), flush=True)
+        return 0
+
+    if args.cmd == "region":
+        try:
+            want_regions = regions_from_args(args.state, args.city, args.preset)
+        except ValueError as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False), flush=True)
+            return 2
+        per = args.per_city or args.count
+        colon = "://" not in template          # giữ đúng dạng của mẫu (proxy.txt là dạng colon)
+        lines: list[str] = []
+        for st, ct in want_regions:
+            pinned = set_region(template, state=st, city=ct, country=args.country)
+            if args.sess_time:
+                pinned = set_session_duration(pinned, args.sess_time)
+            for line in generate(pinned, per):
+                lines.append(to_colon_form(line) if colon else line)
+        if args.out:
+            Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(json.dumps({"regions": [{"state": s, "city": c, "count": per} for s, c in want_regions],
+                          "total": len(lines), "out": args.out or None,
+                          "sample": mask_proxy(lines[0]) if lines else None},
+                         ensure_ascii=False), flush=True)
         return 0
 
     if not ippure.enabled():
