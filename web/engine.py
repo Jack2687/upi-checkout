@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import secrets
 import sys
 import threading
@@ -126,6 +127,20 @@ class Task:
     plus_state: str = ""             # "" | checking | plus | not_plus
     plus_checked_at: int = 0         # epoch lần dò gần nhất
     plus_note: str = ""              # chi tiết thô: "AT 401 · promo active"
+    # Vùng hoá đơn của acc này. Flow in ra log, engine BẮT LẠI ngay lúc nhận để lưu
+    # vào kết quả — trước đây thông tin này chỉ nằm trong log và log chỉ giữ 50 dòng
+    # cuối, nên 85% task thành công mất dữ liệu vùng -> không thống kê được vùng nào
+    # ra mã ₹0 nhiều hơn.
+    # Hai NGUỒN khác nhau, không trộn:
+    #  • geo_*  = vị trí IP exit (dòng "billing geo:" / "tier 2") -> vùng của PROXY
+    #  • billing_* = địa chỉ THẬT trên hoá đơn (dòng PM billing_details) -> có thể
+    #    khác geo vì flow có list địa chỉ dự phòng theo thành phố lớn.
+    geo_state: str = ""
+    geo_city: str = ""
+    geo_pin: str = ""
+    billing_name: str = ""           # tên trên hoá đơn (để đo trùng lặp tên)
+    billing_city: str = ""
+    billing_pin: str = ""
     no_retry: bool = False           # lỗi cấp account -> đừng retry (risk decline)
     no_retry_reason: str = ""
     done_at: int = 0                 # epoch lúc task xong -> UI sắp tab Success theo mốc này
@@ -181,6 +196,12 @@ class Task:
             "plus_state": self.plus_state,
             "plus_checked_at": self.plus_checked_at,
             "plus_note": self.plus_note,
+            "geo_state": self.geo_state,
+            "geo_city": self.geo_city,
+            "geo_pin": self.geo_pin,
+            "billing_name": self.billing_name,
+            "billing_city": self.billing_city,
+            "billing_pin": self.billing_pin,
             "logs": self.logs[-max(0, log_tail):] if log_tail else [],
         }
 
@@ -897,6 +918,38 @@ def _pick_proxy(job_id: str, proxies: list[str], task_id: str = "") -> str:
 
 
 # -------------------------------------------------------------- step helpers
+# Ba dạng dòng log flow in ra về hoá đơn. Bắt NGAY lúc nhận log để lưu vào kết quả,
+# vì log của task chỉ giữ 50 dòng cuối -> 85% task thành công mất dòng billing.
+# Ghi theo từng khoá, mỗi khoá chỉ lấy lần đầu -> nhiều dòng không ghi đè nhau.
+_BILLING_PATTERNS: tuple[tuple["re.Pattern[str]", tuple[str, ...]], ...] = (
+    # billing geo: Karnataka / PIN 575001 / exit 157.45.192.254 (IN) via geo_exit:nominatim
+    (re.compile(r"billing geo:\s*([^/]+?)\s*/\s*PIN\s*(\d{6})"),
+     ("geo_state", "geo_pin")),
+    # billing tier 2 (PIN verified) 157.45.192.254 / Dakshina Kannada / KA 575001 · source …
+    # (bản cũ tiếng Việt: "billing mức 2 (PIN xác thực) …")
+    (re.compile(r"billing (?:mức 2|tier 2) \([^)]*\)\s*\S+\s*/\s*([^/]+?)\s*/\s*[A-Z]{2}\s*(\d{6})"),
+     ("geo_city", "geo_pin")),
+    # IN details filled into PM billing_details: Vivaan Joshi / 67 Janpath / New Delhi 110001
+    (re.compile(r"details filled into PM billing_details:\s*(.+?)\s*/\s*(.+?)\s*/\s*(.+?)\s+(\d{6})\s*$"),
+     ("billing_name", "_addr", "billing_city", "billing_pin")),
+)
+
+
+def _absorb_billing(task: Task, line: str) -> None:
+    """Bắt thông tin hoá đơn trong 1 dòng log, ghi vào task (mỗi khoá lấy lần đầu)."""
+    for pattern, keys in _BILLING_PATTERNS:
+        hit = pattern.search(line)
+        if not hit:
+            continue
+        for key, value in zip(keys, hit.groups()):
+            if key.startswith("_") or not value:
+                continue
+            if getattr(task, key, ""):
+                continue                     # đã có -> không ghi đè
+            setattr(task, key, value.strip()[:80])
+        return
+
+
 def _mk_hooks(job: Job, task: Task):
     def step(key: str, status: str, **info: Any) -> None:
         s = task.step(key)
@@ -924,6 +977,7 @@ def _mk_hooks(job: Job, task: Task):
         # logs/web_<job>.log (job) và logs/upi_<ts>.log (extract_cs tự ghi).
         if len(task.logs) < MAX_LOGS_PER_TASK:
             task.logs.append(line[:500])
+        _absorb_billing(task, line)
 
     def on_geo(info: dict) -> None:
         loc = ", ".join(p for p in (info.get("city"), info.get("region"), "IN") if p)
