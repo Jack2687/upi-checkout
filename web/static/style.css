@@ -647,6 +647,8 @@ body[data-filter="success"][data-view="grid"] .success-footer .chip {
 }
 body[data-filter="success"][data-view="grid"] .success-foot-tools { flex: 0 0 auto; }
 body[data-filter="success"][data-view="grid"] .success-foot-expiry { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* Không có đếm ngược thì không để lại khoảng trống trong hàng chip. */
+body[data-filter="success"][data-view="grid"] .success-foot-expiry:empty { display: none; }
 body[data-filter="success"][data-view="grid"] .success-foot-tools { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 body[data-filter="success"][data-view="grid"] .success-footer .card-tool { min-height: 28px; padding: 4px 8px; }
 /* Header card gọn: email bên trái, "UPI · ₹0.00" bên phải (trước nút mở chi tiết). */

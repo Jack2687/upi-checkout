@@ -763,6 +763,13 @@ function fmtCountdown(secs) {
   return s + 's';
 }
 
+// Dạng đồng hồ mm:ss cho đếm ngược ở hàng chân card (kiểu "01:09 remaining").
+// Link UPI sống ~5 phút nên mm:ss là đủ; quá 1h thì thành "83:12" — vẫn đọc được.
+function fmtClock(secs) {
+  const m = Math.floor(secs / 60), sec = secs % 60;
+  return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+}
+
 // Mốc hết hạn tuyệt đối theo giờ máy user — để "còn 23h" có nghĩa cụ thể
 // (mấy giờ, ngày nào) chứ không phải một con số trôi nổi.
 function fmtDeadline(unixSecs) {
@@ -824,9 +831,18 @@ function applyProbe(t, probe) {
     if (st === 'waiting' && p.expires_at) {
       e.successExpiry.dataset.expires = p.expires_at;
       e.successExpiry.hidden = false;
+      // Chip ở hàng chân card (chế độ lưới) cũng đếm ngược, cùng mốc hết hạn.
+      if (e.footExpiry) {
+        e.footExpiry.dataset.expires = p.expires_at;
+        e.footExpiry.hidden = false;
+      }
     } else {
       e.successExpiry.hidden = true;
       e.successExpiry.textContent = '';
+      if (e.footExpiry) {
+        e.footExpiry.hidden = true;
+        e.footExpiry.textContent = '';
+      }
     }
 
     const [text, kind] = (st !== p.status && STATUS_UI[st])
@@ -968,13 +984,20 @@ function tickExpiry(target) {
   if (document.hidden) return;
   const now = Math.floor(Date.now() / 1000);
   const elements = target ? [target]
-    : document.querySelectorAll('.task:not([hidden]) .success-expiry[data-expires]:not([hidden])');
+    : document.querySelectorAll(
+        '.task:not([hidden]) .success-expiry[data-expires]:not([hidden]),'
+        + ' .task:not([hidden]) .success-foot-expiry[data-expires]:not([hidden])');
   elements.forEach((el) => {
     if (el.hidden) return;
     const exp = parseInt(el.dataset.expires, 10) || 0;
     if (!exp) { el.textContent = ''; return; }
     const left = exp - now;
-    el.textContent = left > 0 ? 'expires in ' + fmtCountdown(left) : 'expired';
+    // Ô trong danh sách ghi đầy đủ ("expires in 1m 09s"); chip ở chế độ lưới ghi gọn
+    // theo kiểu đồng hồ ("01:09 remaining") cho vừa một hàng chip.
+    const short = el.classList.contains('success-foot-expiry');
+    el.textContent = left > 0
+      ? (short ? fmtClock(left) + ' remaining' : 'expires in ' + fmtCountdown(left))
+      : 'expired';
     el.title = 'Expires ' + fmtDeadline(exp) + ' (your local time)';
     el.classList.toggle('expired', left <= 0);
   });
@@ -1279,10 +1302,6 @@ function renderRow(t) {
     const amt = a.amount_minor != null ? fmtAmount(a.amount_minor) : '';
     t.el.taskAmount.textContent = amt ? ('UPI · ' + amt) : '';
     t.el.taskAmount.hidden = !amt;
-  }
-  if (t.el.footExpiry) {
-    const ex = t.el.successExpiry;
-    t.el.footExpiry.textContent = (ex && !ex.hidden) ? ex.textContent : '';
   }
   if (t.probe) {
     startMonitor(t);
