@@ -35,7 +35,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 import requests
 
@@ -551,91 +551,12 @@ def setup() -> None:
     core.log = lambda *a, **k: None
 
 
-# Bang uu tien: ti le trong tong so ma ₹0 da trich xuat duoc (thong ke 243 ma
-# dinh vi duoc IP exit, xem lich su). Dung de TU THEM `-st-<bang>` cho proxy
-# arxlabs chua ghim bang -> pool tu nghien ve cac bang nay.
-# LUU Y: day la PHAN BO cua ma thanh cong (khong phai ti le thanh cong theo bang —
-# khong tinh duoc tu du lieu cu); doi bang thi sua dict nay.
-STATE_WEIGHTS: dict[str, float] = {
-    "Uttar Pradesh": 0.156, "Maharashtra": 0.091, "Bihar": 0.091, "Rajasthan": 0.074,
-    "Gujarat": 0.070, "Delhi": 0.066, "Haryana": 0.066, "Punjab": 0.058, "Kerala": 0.053,
-    "Jammu and Kashmir": 0.045, "Tamil Nadu": 0.041, "Telangana": 0.033, "Assam": 0.033,
-    "Madhya Pradesh": 0.029, "Karnataka": 0.025,
-    "Andhra Pradesh": 0.010, "Uttarakhand": 0.010, "Chandigarh": 0.010,
-    "Jharkhand": 0.010, "Odisha": 0.010, "West Bengal": 0.010,
-    "Mizoram": 0.010, "Goa": 0.010,
-}
-_STATE_PARAM_RE = re.compile(r"(?i)-st-[^-]+(?: [A-Za-z]+)?")
-_REGION_PAIR_RE = re.compile(r"(?i)(-region-[A-Za-z]{2})(?=-|$)")
-
-
-def _auto_pin_state(user: str) -> str:
-    """Them `-st-<bang>` vao username arxlabs neu chua ghim bang.
-
-    Vi sao: proxy dang `...-region-IN-sid-XXXX-t-5` khong chi dinh bang nen IP exit
-    roi ngau nhien khap An Do (do duoc: chi ~50% dung bang khi co ghim, con khong ghim
-    thi hoan toan ngau nhien). O day nghien pool ve cac bang co ti le cao.
-
-    Chi dung proxy co `region-XX` + session id; provider khac (bestgo, cliproxy...)
-    tra ve nguyen trang. Proxy DA co `-st-` thi giu nguyen (ton trong y dinh nguoi dung).
-    """
-    if not user or not os.environ.get("UPI_AUTO_STATE", "1") == "1":
-        return user
-    if _STATE_PARAM_RE.search(user) or not _REGION_PAIR_RE.search(user):
-        return user
-    if not re.search(r"(?i)\b(sid|session|sessid|sessionid)[-_]", user):
-        return user
-    states = list(STATE_WEIGHTS)
-    weights = [STATE_WEIGHTS[s] for s in states]
-    state = random.choices(states, weights=weights, k=1)[0]
-    return _REGION_PAIR_RE.sub(lambda m: "%s-st-%s" % (m.group(1), state), user, count=1)
-
-
-# CHI ghim bang cho cac host nay. Vi sao phai gioi han: provider khac (bestgo,
-# cliproxy...) khong ho tro tham so `-st-`; chen vao la lam hong pool dang chay.
-# Doi duoc bang env, nhieu host ngan cach bang dau phay.
-_AUTO_STATE_HOSTS = tuple(h.strip() for h in
-                          os.environ.get("UPI_AUTO_STATE_HOSTS", "arxlabs.io").split(",")
-                          if h.strip())
-
-
-def _host_ok_for_state(host: str) -> bool:
-    """Phải KHỚP HẬU TỐ: 'us.arxlabs.io' ✓, 'us.arxlabs.io.evil.com' ✗."""
-    host = host.rsplit("@", 1)[-1].rsplit(":", 1)[0].lower()
-    return any(host == h or host.endswith("." + h) for h in _AUTO_STATE_HOSTS)
-
-
-def _auto_pin_state_line(line: str) -> str:
-    """Ap _auto_pin_state cho ca 2 dang dong: host:port:user:pass va scheme://user:pass@host:port."""
-    if "://" in line:
-        scheme, _, rest = line.partition("://")
-        creds, _, hostport = rest.rpartition("@")
-        if not creds or not _host_ok_for_state(hostport):
-            return line
-        user, _, pw = creds.partition(":")
-        user2 = _auto_pin_state(unquote(user))
-        if user2 == unquote(user):
-            return line
-        return "%s://%s:%s@%s" % (scheme, quote(user2), pw, hostport)
-    parts = line.split(":")
-    if len(parts) != 4:
-        return line
-    host, port, user, pw = parts
-    if not _host_ok_for_state(host):
-        return line
-    user2 = _auto_pin_state(user)
-    if user2 == user:
-        return line
-    return "%s:%s:%s:%s" % (host, port, user2, pw)
-
-
 def load_proxies(path: Path) -> list[str]:
     px = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        line = _auto_pin_state_line(line)
         if "://" in line:
             px.append(core.normalize_proxy_url(line))
         else:
