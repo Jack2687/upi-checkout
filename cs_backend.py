@@ -84,7 +84,8 @@ class _LineWriter(io.TextIOBase):
 # Configuration and output hooks are installed in execution_context below.
 
 def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
-                retry_limit: int | None, country: str) -> dict[str, str]:
+                retry_limit: int | None, country: str,
+                stripe_telemetry: bool = False) -> dict[str, str]:
     """Return settings previously supplied to the child runner."""
 
     values = {
@@ -105,6 +106,11 @@ def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
         "UPI_APPROVE_RETRY_MAX": "1",
         "UPI_MAX_APPROVE_BLOCKED": "1",
     }
+    if stripe_telemetry:
+        # Đăng ký phiên Stripe tại m.stripe.com -> dùng muid/guid/sid thật
+        # (xem extract_cs.stripe_telemetry_ids). Đặt trong settings của execution
+        # context nên chỉ ảnh hưởng job này, không đụng os.environ của cả process.
+        values["UPI_STRIPE_TELEMETRY"] = "1"
     if retry_limit is not None:
         limit = str(max(1, min(5, int(retry_limit))))
         values.update({
@@ -140,6 +146,7 @@ def run_in_process(
     retry_limit: int | None = None,
     country: str = "IN",
     timeout: float = 240.0,
+    stripe_telemetry: bool = False,
 ) -> BackendResult:
     """Run one CS flow in this interpreter.
 
@@ -167,7 +174,8 @@ def run_in_process(
     state_file.write_text(extract_cs.STATE_TMPL if hasattr(extract_cs, "STATE_TMPL")
                           else '{"seed": {}, "checkout": {}, "promotion": {}, "provider": {}, "pair": {}}',
                           encoding="utf-8")
-    values = _env_values(token, proxy_path, state_file, promo, retry_limit, country)
+    values = _env_values(token, proxy_path, state_file, promo, retry_limit, country,
+                         stripe_telemetry)
     writer = _LineWriter(lines, on_line)
 
     def on_result(values: dict) -> None:

@@ -116,6 +116,7 @@ const els = {
   useProxy: document.getElementById('use-proxy'),
   mixProxy: document.getElementById('mix-proxy'),
   filterProxy: document.getElementById('filter-proxy'),
+  stripeTelemetry: document.getElementById('stripe-telemetry'),
   proxies: document.getElementById('proxies'),
   poolStatus: document.getElementById('pool-status'),
   poolCount: document.getElementById('pool-count'),
@@ -2372,6 +2373,7 @@ async function runJob() {
     proxies: els.useProxy.checked ? getProxies() : null,
     mix: els.mixProxy.checked,
     filter_proxies: els.filterProxy.checked,
+    stripe_telemetry: els.stripeTelemetry.checked,
   };
 
   state.running = true;
@@ -2587,6 +2589,7 @@ function saveForm() {
       useProxy: els.useProxy.checked,
       mixProxy: els.mixProxy.checked,
       filterProxy: els.filterProxy.checked,
+      stripeTelemetry: els.stripeTelemetry.checked,
       mode: state.mode,
       country: els.country.value,
       promo: els.promo.value,
@@ -2616,6 +2619,8 @@ function loadForm() {
   els.mixProxy.checked = saved.mixProxy !== false;
   // Lọc proxy cũng mặc định BẬT: chỉ false khi người dùng đã tự tắt.
   els.filterProxy.checked = saved.filterProxy !== false;
+  // Thử nghiệm generic_decline: mặc định TẮT.
+  els.stripeTelemetry.checked = saved.stripeTelemetry === true;
   els.proxies.hidden = !els.useProxy.checked;
   if (saved.country) els.country.value = saved.country;
   // Chỉ nhận promo còn tồn tại trong <select>: giá trị đã lưu mà option đã bị bỏ
@@ -2666,6 +2671,7 @@ function bindEvents() {
   });
   els.mixProxy.addEventListener('change', saveForm);
   els.filterProxy.addEventListener('change', saveForm);
+  els.stripeTelemetry.addEventListener('change', saveForm);
   els.poolClear.addEventListener('click', () => {
     els.proxies.value = '';
     updatePoolStatus();

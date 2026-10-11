@@ -412,6 +412,16 @@ class ProxyFilterFlagTests(unittest.TestCase):
         self.assertEqual(proxy, proxy_url)
         self.assertEqual(verdict, good)
 
+    def test_telemetry_flag_reaches_the_backend_request(self):
+        job = self.job(filter_proxies=True)
+        job.stripe_telemetry = True
+        task = self.task()
+        req = engine._backend_request(job, task, "http://p@h:1", Path("seed.txt"))
+        self.assertTrue(req.stripe_telemetry)
+        job.stripe_telemetry = False
+        req = engine._backend_request(job, task, "http://p@h:1", Path("seed.txt"))
+        self.assertFalse(req.stripe_telemetry)
+
     def test_prepare_labels_the_job_when_the_filter_is_off(self):
         _, _, label, report = engine._prepare_proxies(
             "job1", "us.arxlabs.io:3010:acct-region-IN-sid-aaaa-t-5:pw", 1, True, False)

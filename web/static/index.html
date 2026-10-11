@@ -91,6 +91,11 @@
           <span>Proxy quality filter</span>
         </label>
         <div class="helper">Tick (default): each worker probes its proxy first and drops unreachable / wrong-country / tor ones, then tries the next, generating a new session if the pool runs out. Untick to use the pool exactly as pasted — no probing, no dropping, no replacement — to compare runs with and without the filter.</div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="stripe-telemetry">
+          <span>Register Stripe session (m.stripe.com)</span>
+        </label>
+        <div class="helper">Off by default. When on, each run asks Stripe's own telemetry endpoint for real <code>muid/guid/sid</code> (via the task's proxy) instead of made-up ids. Experiment for the <code>generic_decline</code> block — run two comparable batches, one with it on and one off, and compare decline rates.</div>
 
       </div>
 
