@@ -568,6 +568,11 @@ def stripe_browser_id() -> str:
     return f"{uuid.uuid4()}{uuid.uuid4().hex[:8]}"
 
 
+def _task_label() -> str:
+    """Nhãn task trong log flow (cs_backend đặt UPI_TASK_LABEL=t<idx>)."""
+    return str(env_value("UPI_TASK_LABEL", "") or "-")
+
+
 def stripe_telemetry_ids(proxy: str = "") -> dict[str, str]:
     """Xin `muid/guid/sid` THẬT từ https://m.stripe.com/6 (endpoint telemetry của Stripe.js).
 
@@ -594,13 +599,14 @@ def stripe_telemetry_ids(proxy: str = "") -> dict[str, str]:
                             headers=headers, timeout=15)
         data = resp.json() if resp.status_code < 400 else {}
     except Exception as exc:                      # noqa: BLE001 — lỗi thì chạy như cũ
-        log(f"stripe telemetry: bỏ qua ({type(exc).__name__}: {str(exc)[:80]})", "[WARN] ")
+        log(f"stripe telemetry[{_task_label()}]: bỏ qua "
+            f"({type(exc).__name__}: {str(exc)[:80]})", "[WARN] ")
         return {}
     ids = {key: str(data.get(key) or "") for key in ("muid", "guid", "sid")}
     if not all(ids.values()):
-        log(f"stripe telemetry: phản hồi thiếu id ({str(data)[:80]})", "[WARN] ")
+        log(f"stripe telemetry[{_task_label()}]: phản hồi thiếu id ({str(data)[:80]})", "[WARN] ")
         return {}
-    log("stripe telemetry: đã đăng ký phiên tại m.stripe.com")
+    log(f"stripe telemetry[{_task_label()}]: đã đăng ký phiên tại m.stripe.com")
     return ids
 
 

@@ -85,7 +85,7 @@ class _LineWriter(io.TextIOBase):
 
 def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
                 retry_limit: int | None, country: str,
-                stripe_telemetry: bool = False) -> dict[str, str]:
+                stripe_telemetry: bool = False, idx: int = 0) -> dict[str, str]:
     """Return settings previously supplied to the child runner."""
 
     values = {
@@ -105,6 +105,10 @@ def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
         "UPI_PROVIDER_RETRY_MAX": "1",
         "UPI_APPROVE_RETRY_MAX": "1",
         "UPI_MAX_APPROVE_BLOCKED": "1",
+        # Nhãn task trong log flow: log flow dùng CHUNG 1 file cho cả job nên không
+        # có nhãn thì không quy được dòng nào của task nào (vd không so được task
+        # đăng ký telemetry thành công với task thất bại trong cùng job).
+        "UPI_TASK_LABEL": f"t{idx}",
     }
     if stripe_telemetry:
         # Đăng ký phiên Stripe tại m.stripe.com -> dùng muid/guid/sid thật
@@ -175,7 +179,7 @@ def run_in_process(
                           else '{"seed": {}, "checkout": {}, "promotion": {}, "provider": {}, "pair": {}}',
                           encoding="utf-8")
     values = _env_values(token, proxy_path, state_file, promo, retry_limit, country,
-                         stripe_telemetry)
+                         stripe_telemetry, idx)
     writer = _LineWriter(lines, on_line)
 
     def on_result(values: dict) -> None:
