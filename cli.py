@@ -629,6 +629,16 @@ def _auto_pin_state_line(line: str) -> str:
     return "%s:%s:%s:%s" % (host, port, user2, pw)
 
 
+def auto_pin_states(lines: list[str]) -> list[str]:
+    """Áp _auto_pin_state_line cho cả danh sách.
+
+    Cần hàm này vì đường CUSTOM POOL (dán trong web) đi qua `parse_proxy_lines()`
+    trong engine chứ không qua `load_proxies()` — thiếu nó thì pool dán tay không
+    được ghim bang (đúng lỗi đã gặp với job babeea18c2cb).
+    """
+    return [_auto_pin_state_line(l) for l in lines]
+
+
 def load_proxies(path: Path) -> list[str]:
     px = []
     for line in path.read_text(encoding="utf-8").splitlines():
