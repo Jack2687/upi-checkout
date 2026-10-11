@@ -70,6 +70,7 @@ class RunRequest(BaseModel):
     retries: int = Field(default=3, ge=1, le=5)
     proxies: str | None = None
     mix: bool = Field(default=False, description="shuffle the pool before assigning proxies")
+    filter_proxies: bool = Field(default=True, description="probe + drop dead/wrong-country proxies")
 
 
 class AppendRequest(BaseModel):
@@ -128,7 +129,8 @@ def api_run(req: RunRequest) -> dict:
         raise HTTPException(400, f"invalid mode: {req.mode}")
     try:
         job = engine.start_job(tokens, req.mode, req.country, req.promo,
-                               req.workers, req.proxies, req.retries, req.mix)
+                               req.workers, req.proxies, req.retries, req.mix,
+                               req.filter_proxies)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"job_id": job.job_id, "total": job.total}

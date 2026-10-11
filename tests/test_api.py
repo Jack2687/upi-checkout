@@ -50,10 +50,17 @@ class ApiRequestTests(unittest.TestCase):
         with patch.object(engine, "start_job", return_value=job) as start:
             req = web_app.RunRequest(tokens='["one", {"token":"two"}]', mode="cs",
                                      country="IN", promo="off", workers=16, retries=1,
-                                     proxies="offline proxy fixture", mix=True)
+                                     proxies="offline proxy fixture", mix=True,
+                                     filter_proxies=False)
             self.assertEqual(web_app.api_run(req), {"job_id": job.job_id, "total": 2})
         start.assert_called_once_with(["one", "two"], "cs", "IN", "off", 16,
-                                      "offline proxy fixture", 1, True)
+                                      "offline proxy fixture", 1, True, False)
+
+    def test_run_defaults_to_filtering_proxies(self):
+        job = SimpleNamespace(job_id="abcdef123456", total=1)
+        with patch.object(engine, "start_job", return_value=job) as start:
+            web_app.api_run(web_app.RunRequest(tokens="one"))
+        self.assertEqual(start.call_args.args[-1], True)
 
     def test_invalid_run_never_reaches_engine(self):
         with patch.object(engine, "start_job") as start:

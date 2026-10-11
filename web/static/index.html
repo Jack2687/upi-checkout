@@ -86,6 +86,11 @@
           <span>Mix pool order</span>
         </label>
         <div class="helper">Shuffles the pool once per job (fresh random order each run), so accounts draw from different region groups instead of the pool being handed out block by block. Untick to keep the pasted order.</div>
+        <label class="checkbox-row">
+          <input type="checkbox" id="filter-proxy" checked>
+          <span>Proxy quality filter</span>
+        </label>
+        <div class="helper">Tick (default): each worker probes its proxy first and drops unreachable / wrong-country / tor ones, then tries the next, generating a new session if the pool runs out. Untick to use the pool exactly as pasted — no probing, no dropping, no replacement — to compare runs with and without the filter.</div>
 
       </div>
 

@@ -201,6 +201,23 @@ async def run(url: str, n_tokens: int, headed: bool, shot: str | None) -> int:
         await page.check("#mix-proxy")
         await page.wait_for_timeout(120)
 
+        print("6c. Cờ tắt lọc proxy")
+        # Tắt lọc = dùng pool nguyên trạng (không chấm/không loại/không sinh bù) để test 2 chiều.
+        filt = await page.evaluate("""() => {
+          const box = document.getElementById('filter-proxy');
+          const saved = JSON.parse(localStorage.getItem('upi-web-form-v1') || '{}');
+          return {checked: box.checked, saved: saved.filterProxy};
+        }""")
+        check("Lọc proxy bật mặc định", filt["checked"] is True, str(filt))
+        check("Lọc proxy được lưu vào form", filt["saved"] is True, str(filt))
+        await page.uncheck("#filter-proxy")
+        await page.wait_for_timeout(120)
+        saved_off2 = await page.evaluate(
+            "() => JSON.parse(localStorage.getItem('upi-web-form-v1') || '{}').filterProxy")
+        check("Tắt lọc proxy thì lưu lại là false", saved_off2 is False, str(saved_off2))
+        await page.check("#filter-proxy")
+        await page.wait_for_timeout(120)
+
         print("7. Xoá task: ✕ từng card + nút Dọn dẹp (phải xoá cả trên server)")
         # Chờ job kết thúc: server CẤM xoá task đang chạy/chờ của job đang chạy
         # (chúng thuộc worker thread), nên test phải đợi thay vì fail oan.

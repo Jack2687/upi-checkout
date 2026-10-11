@@ -184,6 +184,21 @@ Trộn bằng RNG gieo theo `job_id`: mỗi job một thứ tự mới, cùng jo
 sau khi trộn vẫn được ghi ra `cs_state/web_proxies_<job>.txt` (đúng thứ tự đã dùng) và
 nhãn job hiện thêm `· mixed` để biết lần chạy đó có trộn hay không.
 
+## Tắt bộ lọc proxy (Proxy quality filter)
+
+Tick **"Proxy quality filter"** (mặc định BẬT): mỗi worker tự probe proxy của mình, loại con
+không kết nối được / sai nước / tor / malicious rồi thử con kế tiếp; hết pool thì sinh thêm
+1 session mới. Đây là đường `UPI_PROXY_QUALITY=lazy`.
+
+Bỏ tick → `Job.filter_proxies = False`: dùng pool **nguyên trạng**, chia theo thứ tự (hoặc
+thứ tự đã trộn nếu bật Mix pool order), **không probe, không loại, không sinh bù**. Nhãn job
+hiện thêm `· no filter` để biết lần chạy đó có lọc hay không — dùng để so 2 chiều xem bộ lọc
+có thật sự giúp gì.
+
+Lưu ý: bộ lọc chỉ loại proxy *hỏng/sai nước*, **không** loại theo `risk`/verdict. Số liệu
+74.276 lần thử cho thấy tỉ lệ ra mã ₹0 gần như không đổi theo chất lượng IP (clean 0,47% ·
+medium 0,32% · dirty 0,37%), nên tắt lọc chủ yếu để tiết kiệm 2–5s probe mỗi task.
+
 ## Lọc proxy sạch / risk thấp trước khi chạy
 
 Bật **"Chỉ dùng proxy sạch (risk thấp)"** + đặt **điểm tối thiểu** → server quét cả pool

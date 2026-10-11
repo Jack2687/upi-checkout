@@ -352,5 +352,65 @@ class BillingCaptureTests(unittest.TestCase):
         self.assertEqual((t.billing_name, t.billing_city, t.billing_pin), ("", "", ""))
 
 
+class ProxyFilterFlagTests(unittest.TestCase):
+    """`filter_proxies=False` -> dùng pool nguyên trạng, không chấm/không loại."""
+
+    def setUp(self):
+        # Không để test ghi rác vào cs_state/logs thật.
+        self.tmp = tempfile.TemporaryDirectory(prefix="upi-filter-test-")
+        root = Path(self.tmp.name)
+        (root / "state").mkdir()
+        (root / "logs").mkdir()
+        self.enterContext(patch.object(engine, "STATE_DIR", root / "state"))
+        self.enterContext(patch.object(engine, "LOG_DIR", root / "logs"))
+        self.enterContext(patch.object(engine, "DEFAULT_PROXY_FILE", root / "proxy.txt"))
+
+    def tearDown(self):
+        engine._JOBS.clear()
+        engine._JOB_ORDER.clear()
+        self.doCleanups()
+        self.tmp.cleanup()
+
+    def job(self, filter_proxies=True, country="IN"):
+        return engine.Job("job1", "cs", ["tok"], country, "off", 2, "pool", 1,
+                          filter_proxies)
+
+    def task(self):
+        return engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+
+    def test_filter_off_returns_pool_proxy_without_probing(self):
+        job = self.job(filter_proxies=False)
+        proxies = ["http://one@h:1", "http://two@h:2"]
+        with patch("ippure.check", side_effect=AssertionError("must not probe")) as check:
+            proxy, _, verdict = engine._acquire_proxy(job, self.task(), proxies,
+                                                      Path("seed.txt"))
+        check.assert_not_called()
+        self.assertEqual((proxy, verdict), (proxies[0], {}))
+        self.assertFalse(job.filter_proxies)
+
+    def test_filter_on_keeps_the_probe_path(self):
+        good = {"ok": True, "country": "IN", "flags": [], "grade": "A", "score": 90,
+                "label": "proxy#uniq1", "risk": 5, "user_type": "residential",
+                "latency_ms": 900}
+        proxy_url = "http://unique-filter-test@h:9"
+        with patch("ippure.enabled", return_value=True), \
+             patch("ippure.check", return_value=good) as check:
+            proxy, _, verdict = engine._acquire_proxy(self.job(), self.task(),
+                                                      [proxy_url], Path("seed.txt"))
+        check.assert_called_once()
+        self.assertEqual(proxy, proxy_url)
+        self.assertEqual(verdict, good)
+
+    def test_prepare_labels_the_job_when_the_filter_is_off(self):
+        _, _, label, report = engine._prepare_proxies(
+            "job1", "us.arxlabs.io:3010:acct-region-IN-sid-aaaa-t-5:pw", 1, True, False)
+        self.assertIn("no filter", label)
+        self.assertEqual(report["mode"], "off")
+        _, _, on_label, on_report = engine._prepare_proxies(
+            "job1", "us.arxlabs.io:3010:acct-region-IN-sid-aaaa-t-5:pw", 1, True, True)
+        self.assertNotIn("no filter", on_label)
+        self.assertNotEqual(on_report["mode"], "off")
+
+
 if __name__ == "__main__":
     unittest.main()

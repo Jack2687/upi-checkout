@@ -209,7 +209,8 @@ class Task:
 
 class Job:
     def __init__(self, job_id: str, mode: str, tokens: list[str], country: str,
-                 promo: str, workers: int, proxy_source: str, retries: int = 1) -> None:
+                 promo: str, workers: int, proxy_source: str, retries: int = 1,
+                 filter_proxies: bool = True) -> None:
         self.job_id = job_id
         self.mode = mode
         self.country = country
@@ -217,6 +218,9 @@ class Job:
         self.workers = workers
         self.retries = retries
         self.proxy_source = proxy_source
+        # False = dùng pool NGUYÊN TRẠNG: không chấm điểm, không loại proxy chết/sai
+        # nước, không sinh session mới — để đo xem bộ lọc có giúp gì không.
+        self.filter_proxies = filter_proxies
         self.total = len(tokens)
         self.tasks: dict[str, Task] = {}
         self.order: list[str] = []
@@ -857,7 +861,8 @@ def mix_pool(proxies: list[str], job_id: str = "") -> list[str]:
 
 def _prepare_proxies(job_id: str, proxies: str | None,
                      task_count: int = 0,
-                     mix: bool = False) -> tuple[Path, list[str], str, dict]:
+                     mix: bool = False,
+                     filter_proxies: bool = True) -> tuple[Path, list[str], str, dict]:
     """Tra ve (proxy_file, danh sach proxy, nhan hien thi, bao cao chat luong).
 
     KHONG cham proxy o day nua (mac dinh `UPI_PROXY_QUALITY=lazy`). Vi sao: cham
@@ -877,9 +882,11 @@ def _prepare_proxies(job_id: str, proxies: str | None,
     if mix and px:
         px = mix_pool(px, job_id)
         label += " · mixed"
+    if not filter_proxies:
+        label += " · no filter"
 
-    report: dict = {"mode": proxy_quality_mode()}
-    if proxy_quality_mode() == "pre" and px:
+    report: dict = {"mode": proxy_quality_mode() if filter_proxies else "off"}
+    if filter_proxies and proxy_quality_mode() == "pre" and px:
         try:
             import ippure  # noqa: PLC0415
             if ippure.enabled():
@@ -1262,7 +1269,8 @@ def _acquire_proxy(job: Job, task: Task, proxies: list[str],
     nao hong (khong ket noi duoc / sai nuoc / tor / malicious) thi danh dau de
     worker khac khong thu lai, roi thu con ke tiep.
     """
-    if proxy_quality_mode() != "lazy":
+    if proxy_quality_mode() != "lazy" or not job.filter_proxies:
+        # Tat loc: tra proxy theo thu tu pool, khong cham, khong loai, khong sinh bu.
         proxy = _pick_proxy(job.job_id, proxies, task.task_id)
         return proxy, fallback_seed, {}
     try:
@@ -1685,7 +1693,8 @@ def _enqueue_tasks(job: Job, tasks: list[Task]) -> None:
 
 # ---------------------------------------------------------------- public API
 def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: int,
-              proxies: str | None, retries: int = 1, mix: bool = False) -> Job:
+              proxies: str | None, retries: int = 1, mix: bool = False,
+              filter_proxies: bool = True) -> Job:
     tokens = [t.strip() for t in tokens if t.strip()]
     if not tokens:
         raise ValueError("no tokens")
@@ -1700,8 +1709,9 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
 
     STATE_DIR.mkdir(exist_ok=True)
     job_id = secrets.token_hex(6)
-    proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens), mix)
-    job = Job(job_id, mode, tokens, country, promo, workers, label, retries)
+    proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens), mix,
+                                                      filter_proxies)
+    job = Job(job_id, mode, tokens, country, promo, workers, label, retries, filter_proxies)
     job._proxy_file, job._proxies = proxy_file, px
 
     with _JOBS_LOCK:
