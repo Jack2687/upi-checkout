@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import random
 import re
 import secrets
 import sys
@@ -838,8 +839,25 @@ def parse_proxy_lines(text: str) -> list[str]:
 _parse_proxies = parse_proxy_lines
 
 
+def mix_pool(proxies: list[str], job_id: str = "") -> list[str]:
+    """Trộn pool để các task rải đều mọi nhóm vùng thay vì ăn theo thứ tự dán vào.
+
+    `_pick_proxy` chia proxy theo THỨ TỰ trong pool. Pool dán tay thường được xếp
+    theo từng khối vùng (`-st-Maharashtra` 200 dòng, rồi `-st-Bihar` 200 dòng...),
+    nên 200 task đầu sẽ chỉ nhận đúng 1 vùng. Trộn bằng RNG gieo theo job_id ->
+    mỗi job một thứ tự khác nhau nhưng vẫn tái lập được, và pool đã trộn vẫn được
+    ghi ra `cs_state/web_proxies_<job>.txt` để đối chiếu sau.
+    """
+    if len(proxies) < 2:
+        return list(proxies)
+    out = list(proxies)
+    random.Random(f"mix:{job_id}").shuffle(out)
+    return out
+
+
 def _prepare_proxies(job_id: str, proxies: str | None,
-                     task_count: int = 0) -> tuple[Path, list[str], str, dict]:
+                     task_count: int = 0,
+                     mix: bool = False) -> tuple[Path, list[str], str, dict]:
     """Tra ve (proxy_file, danh sach proxy, nhan hien thi, bao cao chat luong).
 
     KHONG cham proxy o day nua (mac dinh `UPI_PROXY_QUALITY=lazy`). Vi sao: cham
@@ -856,6 +874,9 @@ def _prepare_proxies(job_id: str, proxies: str | None,
     else:
         px = cli.load_proxies(DEFAULT_PROXY_FILE)
         label = f"{DEFAULT_PROXY_FILE.name} ({len(px)} proxy)"
+    if mix and px:
+        px = mix_pool(px, job_id)
+        label += " · mixed"
 
     report: dict = {"mode": proxy_quality_mode()}
     if proxy_quality_mode() == "pre" and px:
@@ -1649,7 +1670,7 @@ def _enqueue_tasks(job: Job, tasks: list[Task]) -> None:
 
 # ---------------------------------------------------------------- public API
 def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: int,
-              proxies: str | None, retries: int = 1) -> Job:
+              proxies: str | None, retries: int = 1, mix: bool = False) -> Job:
     tokens = [t.strip() for t in tokens if t.strip()]
     if not tokens:
         raise ValueError("no tokens")
@@ -1664,7 +1685,7 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
 
     STATE_DIR.mkdir(exist_ok=True)
     job_id = secrets.token_hex(6)
-    proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens))
+    proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens), mix)
     job = Job(job_id, mode, tokens, country, promo, workers, label, retries)
     job._proxy_file, job._proxies = proxy_file, px
 

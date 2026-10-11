@@ -162,6 +162,24 @@ async def run(url: str, n_tokens: int, headed: bool, shot: str | None) -> int:
         stored = await page.evaluate("() => !!localStorage.getItem('upi-web-form-v1')")
         check("form được lưu vào localStorage", stored)
 
+        print("6b. Trộn pool proxy")
+        # Pool dán tay thường xếp theo khối vùng; "Mix pool order" phải bật mặc định và
+        # phải được lưu lại, nếu không mỗi lần vào trang lại ăn theo thứ tự dán.
+        mix = await page.evaluate("""() => {
+          const box = document.getElementById('mix-proxy');
+          const saved = JSON.parse(localStorage.getItem('upi-web-form-v1') || '{}');
+          return {checked: box.checked, saved: saved.mixProxy};
+        }""")
+        check("Mix pool order bật mặc định", mix["checked"] is True, str(mix))
+        check("Mix pool order được lưu vào form", mix["saved"] is True, str(mix))
+        await page.uncheck("#mix-proxy")
+        await page.wait_for_timeout(120)
+        saved_off = await page.evaluate(
+            "() => JSON.parse(localStorage.getItem('upi-web-form-v1') || '{}').mixProxy")
+        check("Tắt Mix pool order thì lưu lại là false", saved_off is False, str(saved_off))
+        await page.check("#mix-proxy")
+        await page.wait_for_timeout(120)
+
         print("7. Xoá task: ✕ từng card + nút Dọn dẹp (phải xoá cả trên server)")
         # Chờ job kết thúc: server CẤM xoá task đang chạy/chờ của job đang chạy
         # (chúng thuộc worker thread), nên test phải đợi thay vì fail oan.

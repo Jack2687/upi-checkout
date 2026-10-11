@@ -270,5 +270,45 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(saved["done"], 1000)
 
 
+class PoolMixTests(unittest.TestCase):
+    """Pool dán tay xếp theo khối vùng -> phải trộn trước khi chia cho task."""
+
+    @staticmethod
+    def blocks():
+        out = [f"us.arxlabs.io:3010:acct-region-IN-sid-{i:02d}-t-5:pw" for i in range(4)]
+        for state, size in (("Maharashtra", 8), ("Bihar", 8), ("Delhi", 8)):
+            out += [f"us.arxlabs.io:3010:acct-region-IN-st-{state}-sid-{state[:2]}{i:02d}-t-5:pw"
+                    for i in range(size)]
+        return out
+
+    @staticmethod
+    def state_of(proxy: str) -> str:
+        return proxy.split("-st-")[1].split("-sid-")[0] if "-st-" in proxy else "none"
+
+    def test_mix_keeps_every_proxy_but_breaks_the_block_order(self):
+        pool = self.blocks()
+        mixed = engine.mix_pool(pool, "job1")
+        self.assertEqual(sorted(mixed), sorted(pool))
+        self.assertNotEqual(mixed, pool)
+        # 28 proxy / 4 nhóm: 12 đầu phải chạm đủ cả 4 nhóm, không còn 4 dòng "none" liền nhau.
+        self.assertEqual(len({self.state_of(p) for p in mixed[:12]}), 4)
+
+    def test_mix_is_seeded_per_job_so_a_rerun_gets_a_new_order(self):
+        pool = self.blocks()
+        self.assertEqual(engine.mix_pool(pool, "job1"), engine.mix_pool(pool, "job1"))
+        self.assertNotEqual(engine.mix_pool(pool, "job1"), engine.mix_pool(pool, "job2"))
+
+    def test_prepare_proxies_only_mixes_when_asked(self):
+        with tempfile.TemporaryDirectory(prefix="upi-mix-test-") as tmp:
+            with patch.object(engine, "STATE_DIR", Path(tmp)):
+                pool = "\n".join(self.blocks())
+                _, plain, label, _ = engine._prepare_proxies("job1", pool, 4, False)
+                _, mixed, mixed_label, _ = engine._prepare_proxies("job1", pool, 4, True)
+        self.assertEqual([self.state_of(p) for p in plain[:4]], ["none"] * 4)
+        self.assertNotEqual([self.state_of(p) for p in mixed[:4]], ["none"] * 4)
+        self.assertNotIn("mixed", label)
+        self.assertIn("mixed", mixed_label)
+
+
 if __name__ == "__main__":
     unittest.main()

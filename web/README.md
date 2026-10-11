@@ -171,6 +171,19 @@ Bước đang chạy được tô sáng: nền xanh + viền sáng + vạch acce
 (`@keyframes stepGlow`). Bước xong = xanh lá, thất bại = đỏ. Tiến độ **đơn điệu**
 (chỉ tiến, không lùi) — các vòng retry lặp lại marker nhưng bước đã xong không bị tụt.
 
+## Trộn pool proxy (Mix pool order)
+
+`_pick_proxy` chia proxy theo **thứ tự** trong pool (round-robin, để 100 task trên 100
+proxy thì không trùng nhau). Pool dán tay thường được xếp theo từng khối vùng —
+200 dòng `-st-Maharashtra`, rồi 200 dòng `-st-Bihar`… — nên nếu không trộn thì 200 task
+đầu chỉ nhận đúng **một** vùng. Tick **"Mix pool order"** (mặc định BẬT) để server trộn
+pool một lần cho mỗi job (`engine.mix_pool`), nhờ đó mỗi account rút từ một nhóm vùng khác
+nhau. Bỏ tick = giữ nguyên thứ tự dán vào.
+
+Trộn bằng RNG gieo theo `job_id`: mỗi job một thứ tự mới, cùng job thì tái lập được. Pool
+sau khi trộn vẫn được ghi ra `cs_state/web_proxies_<job>.txt` (đúng thứ tự đã dùng) và
+nhãn job hiện thêm `· mixed` để biết lần chạy đó có trộn hay không.
+
 ## Lọc proxy sạch / risk thấp trước khi chạy
 
 Bật **"Chỉ dùng proxy sạch (risk thấp)"** + đặt **điểm tối thiểu** → server quét cả pool

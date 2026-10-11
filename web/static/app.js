@@ -114,6 +114,7 @@ const els = {
   tokenCount: document.getElementById('token-count'),
   modeHint: document.getElementById('mode-hint'),
   useProxy: document.getElementById('use-proxy'),
+  mixProxy: document.getElementById('mix-proxy'),
   proxies: document.getElementById('proxies'),
   poolStatus: document.getElementById('pool-status'),
   poolCount: document.getElementById('pool-count'),
@@ -2327,6 +2328,7 @@ async function runJob() {
     workers,
     retries,
     proxies: els.useProxy.checked ? getProxies() : null,
+    mix: els.mixProxy.checked,
   };
 
   state.running = true;
@@ -2540,6 +2542,7 @@ function saveForm() {
       tokens: els.tokens.value,
       proxies: els.proxies.value,
       useProxy: els.useProxy.checked,
+      mixProxy: els.mixProxy.checked,
       mode: state.mode,
       country: els.country.value,
       promo: els.promo.value,
@@ -2565,6 +2568,8 @@ function loadForm() {
   if (typeof saved.tokens === 'string') els.tokens.value = saved.tokens;
   if (typeof saved.proxies === 'string') els.proxies.value = saved.proxies;
   els.useProxy.checked = !!saved.useProxy;
+  // Mặc định mới là BẬT: chỉ nhận false khi người dùng đã từng tắt và form có lưu giá trị.
+  els.mixProxy.checked = saved.mixProxy !== false;
   els.proxies.hidden = !els.useProxy.checked;
   if (saved.country) els.country.value = saved.country;
   // Chỉ nhận promo còn tồn tại trong <select>: giá trị đã lưu mà option đã bị bỏ
@@ -2613,6 +2618,7 @@ function bindEvents() {
     updatePoolStatus();
     saveForm();
   });
+  els.mixProxy.addEventListener('change', saveForm);
   els.poolClear.addEventListener('click', () => {
     els.proxies.value = '';
     updatePoolStatus();
