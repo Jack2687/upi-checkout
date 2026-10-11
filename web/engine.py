@@ -956,8 +956,13 @@ _BILLING_PATTERNS: tuple[tuple["re.Pattern[str]", tuple[str, ...]], ...] = (
 )
 
 
-def _absorb_billing(task: Task, line: str) -> None:
-    """Bắt thông tin hoá đơn trong 1 dòng log, ghi vào task (mỗi khoá lấy lần đầu)."""
+def _absorb_billing(task: Task, line: str) -> dict[str, str]:
+    """Bắt thông tin hoá đơn trong 1 dòng log, ghi vào task (mỗi khoá lấy lần đầu).
+
+    Trả về các khoá VỪA ghi (rỗng nếu dòng này không phải dòng hoá đơn) — caller
+    bắn event `task_billing` để panel hiện khối "Billing details" ngay, không phải F5.
+    """
+    written: dict[str, str] = {}
     for pattern, keys in _BILLING_PATTERNS:
         hit = pattern.search(line)
         if not hit:
@@ -967,8 +972,11 @@ def _absorb_billing(task: Task, line: str) -> None:
                 continue
             if getattr(task, key, ""):
                 continue                     # đã có -> không ghi đè
-            setattr(task, key, value.strip()[:80])
-        return
+            clean = value.strip()[:80]
+            setattr(task, key, clean)
+            written[key] = clean
+        return written
+    return written
 
 
 def _mk_hooks(job: Job, task: Task):
@@ -998,7 +1006,10 @@ def _mk_hooks(job: Job, task: Task):
         # logs/web_<job>.log (job) và logs/upi_<ts>.log (extract_cs tự ghi).
         if len(task.logs) < MAX_LOGS_PER_TASK:
             task.logs.append(line[:500])
-        _absorb_billing(task, line)
+        got = _absorb_billing(task, line)
+        if got:
+            # Panel hiện khối "Billing details" ngay khi bắt được dòng hoá đơn.
+            job.emit({"type": "task_billing", "task_id": task.task_id, "billing": got})
 
     def on_geo(info: dict) -> None:
         loc = ", ".join(p for p in (info.get("city"), info.get("region"), "IN") if p)
@@ -1565,6 +1576,10 @@ def _reset_task_for_retry(job: Job, task: Task) -> None:
     task.no_retry = False
     task.no_retry_reason = ""
     task.egress = None
+    # Xoá hoá đơn của lần chạy trước: dữ liệu lưu lại phải là của LẦN CHẠY CUỐI,
+    # nếu không thì task retry xong vẫn mang vùng/PIN của lần 1 (đọc sai vùng nào ra mã).
+    task.geo_state = task.geo_city = task.geo_pin = ""
+    task.billing_name = task.billing_city = task.billing_pin = ""
     task.status = "pending"
     task.updated_at = _now()
     job.emit({"type": "task_init", "task_id": task.task_id, "index": task.index,

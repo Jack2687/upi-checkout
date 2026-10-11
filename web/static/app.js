@@ -196,6 +196,7 @@ function newTask(taskId) {
     duration_ms: null,
     run: 1,
     egress: null,           // {ip, location, probed_at}
+    billing: null,          // {billing_name, billing_city, billing_pin, geo_*}
     artifact: null,         // {upi_link, qr_png, qr_svg, amount_minor, intent}
     // Acc đã lên Plus chưa. Server chỉ bắt đầu dò khi khách DUYỆT MANDATE
     // (link_state = succeeded), rồi dò lại vài lần vì khách còn phải trả tiền.
@@ -435,6 +436,34 @@ function flowBadgeHtml(t) {
   return '<span class="flow-badge flow-none">—</span>';
 }
 
+function billingHtml(t) {
+  // Hoá đơn flow điền vào PM billing_details + vùng IP exit. Server bắt từ log và
+  // gửi qua event `task_billing` / snapshot -> trước đây dữ liệu này chỉ nằm trong
+  // file kết quả, UI không thấy gì.
+  const b = t.billing;
+  if (!b) return '';
+  const rows = [];
+  if (b.billing_name) rows.push(['Billing name', b.billing_name]);
+  const city = [b.billing_city, b.billing_pin].filter(Boolean).join(' ');
+  if (city) rows.push(['Billing city', city]);
+  const geo = [[b.geo_state, b.geo_city].filter(Boolean).join(' · '), b.geo_pin]
+    .filter(Boolean).join(' ');
+  if (geo) rows.push(['Exit geo', geo]);
+  if (!rows.length) return '';
+  return '<div class="egress"><div class="egress-title muted">Billing details</div>' +
+    rows.map(([k, v]) => '<div class="egress-row"><span>' + k + '</span><span>' +
+      esc(v) + '</span></div>').join('') + '</div>';
+}
+
+function billingFromTask(td) {
+  const b = {
+    geo_state: td.geo_state || '', geo_city: td.geo_city || '', geo_pin: td.geo_pin || '',
+    billing_name: td.billing_name || '', billing_city: td.billing_city || '',
+    billing_pin: td.billing_pin || '',
+  };
+  return Object.values(b).some(Boolean) ? b : null;
+}
+
 function flowCardHtml(t) {
   let html =
     '<div class="flow-card">' +
@@ -482,6 +511,7 @@ function flowCardHtml(t) {
     }
     html += '</div>';
   }
+  html += billingHtml(t);
   return html + '</div>';
 }
 
@@ -1919,6 +1949,7 @@ function handleEvent(evt) {
     case 'task_flow': onTaskFlow(evt); break;
     case 'step': onStep(evt); break;
     case 'egress': onEgress(evt); break;
+    case 'task_billing': onBilling(evt); break;
     case 'task_artifact': onArtifact(evt); break;
     case 'task_link': onTaskLink(evt); break;
     case 'task_plus': onTaskPlus(evt); break;
@@ -1977,6 +2008,8 @@ function onTaskInit(evt) {
   t.status = 'pending';
   if (evt.run != null) t.run = evt.run;
   t.rawStatus = t.error = t.duration_ms = t.artifact = t.egress = t.probe = null;
+  // task_init bắn cả khi retry -> xoá hoá đơn của lần chạy trước (giống server).
+  t.billing = null;
   t.linkState = '';
   t.doneAt = 0;
   t.notified = false;
@@ -2020,6 +2053,12 @@ function onEgress(evt) {
     ip: ex.ip || evt.ip || '',
     location: fmtGeo(ex) || evt.location || '',
   };
+  queueTaskRender(t);
+}
+
+function onBilling(evt) {
+  const t = ensureTask(evt.task_id);
+  t.billing = Object.assign({}, t.billing || {}, evt.billing || {});
   queueTaskRender(t);
 }
 
@@ -2248,6 +2287,8 @@ function applySnapshot(data) {
     t.doneAt = td.done_at || 0;
     t.run = td.run || 1;
     t.egress = td.egress || null;
+    // Hoá đơn cũng phải đọc từ snapshot, nếu không F5 xong khối "Billing details" biến mất.
+    t.billing = billingFromTask(td);
     t.artifact = td.artifact || null;
     // Kết luận của server về link (succeeded/failed/...) — snapshot mang sẵn,
     // trước đây bị bỏ nên sau F5 card chỉ còn biết kết quả lần dò của chính nó.

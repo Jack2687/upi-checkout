@@ -133,6 +133,27 @@ async def run(url: str, n_tokens: int, headed: bool, shot: str | None) -> int:
             check("detail hiển thị 'Run'", "Run" in det["text"])
             check("detail có progress", "progress" in det["text"].lower() or "%" in det["text"])
 
+        print("4b. Hoá đơn: event task_billing phải hiện khối 'Billing details'")
+        # Server bắt dòng hoá đơn trong log rồi bắn event này; panel phải vẽ ngay,
+        # không đợi F5 (dữ liệu vẫn nằm trong snapshot để F5 xong còn nguyên).
+        billing = await page.evaluate("""() => {
+          const el = document.querySelector('.task[data-task-id]');
+          const id = el.dataset.taskId;
+          handleEvent({ type: 'task_billing', task_id: id, billing: {
+            billing_name: 'Debashis Behera', billing_city: 'Koderma', billing_pin: '825409',
+            geo_state: 'Jharkhand', geo_city: 'Koderma', geo_pin: '825409' } });
+          return !!((tasks.get(id) || {}).billing);
+        }""")
+        await page.wait_for_timeout(400)
+        check("event task_billing ghi vào task", billing is True, str(billing))
+        bt = await page.evaluate("""() => {
+          const d = document.querySelector('.task-detail:not([hidden])');
+          return d ? d.innerText.replace(/\\n+/g, ' | ') : '';
+        }""")
+        check("panel hiện khối Billing details", "Billing details" in bt, bt[:160])
+        for need in ("Billing name", "Debashis Behera", "Koderma 825409", "Jharkhand"):
+            check("panel có '" + need + "'", need in bt, bt[:200])
+
         print("5. Tab lọc — mỗi tab phải hiện ĐÚNG số ghi trên nhãn")
         keys = await page.evaluate(
             "() => [...document.querySelectorAll('.tab')].map(b => b.dataset.filter)")

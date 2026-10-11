@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "web"))
@@ -308,6 +309,47 @@ class PoolMixTests(unittest.TestCase):
         self.assertNotEqual([self.state_of(p) for p in mixed[:4]], ["none"] * 4)
         self.assertNotIn("mixed", label)
         self.assertIn("mixed", mixed_label)
+
+
+class BillingCaptureTests(unittest.TestCase):
+    """Log hoá đơn -> field của task + event `task_billing` cho panel."""
+
+    def task(self):
+        return engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+
+    def test_log_lines_fill_the_task_and_emit_one_event(self):
+        events = []
+        job = SimpleNamespace(mode="cs", emit=events.append)
+        t = self.task()
+        _, on_log, _ = engine._mk_hooks(job, t)
+        on_log("  [PM=IN] IN details filled into PM billing_details: "
+               "Debashis Behera / Flat 122, Puravankara / Koderma 825409")
+        self.assertEqual((t.billing_name, t.billing_city, t.billing_pin),
+                         ("Debashis Behera", "Koderma", "825409"))
+        self.assertEqual([e["type"] for e in events], ["task_billing"])
+        self.assertEqual(events[0]["billing"]["billing_name"], "Debashis Behera")
+
+        # Dòng hoá đơn thứ hai KHÔNG ghi đè và cũng không bắn event thừa.
+        on_log("  [PM=IN] IN details filled into PM billing_details: "
+               "Someone Else / Other Street / Patna 800027")
+        self.assertEqual(t.billing_name, "Debashis Behera")
+        self.assertEqual(len(events), 1)
+
+    def test_geo_line_fills_state_and_pin(self):
+        t = self.task()
+        written = engine._absorb_billing(t, "billing geo: Karnataka / PIN 575001 / exit 1.2.3.4")
+        self.assertEqual(written, {"geo_state": "Karnataka", "geo_pin": "575001"})
+        self.assertEqual(engine._absorb_billing(t, "dòng log bình thường"), {})
+
+    def test_retry_clears_billing_so_results_describe_the_last_run(self):
+        t = self.task()
+        engine._absorb_billing(t, "billing geo: Karnataka / PIN 575001 / exit 1.2.3.4")
+        engine._absorb_billing(t, "  [PM=IN] IN details filled into PM billing_details: "
+                                  "Debashis Behera / Flat 122 / Koderma 825409")
+        job = SimpleNamespace(mode="cs", emit=lambda ev: None)
+        engine._reset_task_for_retry(job, t)
+        self.assertEqual((t.geo_state, t.geo_city, t.geo_pin), ("", "", ""))
+        self.assertEqual((t.billing_name, t.billing_city, t.billing_pin), ("", "", ""))
 
 
 if __name__ == "__main__":
