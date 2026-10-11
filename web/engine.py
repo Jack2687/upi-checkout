@@ -1261,26 +1261,31 @@ def _task_seed_file(job: Job, task: Task, proxy: str, proxies: list[str], backup
     return path
 
 
-def _acquire_proxy(job: Job, task: Task, proxies: list[str],
-                   fallback_seed: Path) -> tuple[str, Path, dict]:
+def _acquire_proxy(job: Job, task: Task,
+                   proxies: list[str]) -> tuple[str, Path, dict]:
     """Worker tu lay + tu cham proxy cua minh. Tra (proxy, seed_file, verdict).
 
     Cham ~2-5s trong CHINH thread cua worker, song song voi cac worker khac. Con
     nao hong (khong ket noi duoc / sai nuoc / tor / malicious) thi danh dau de
     worker khac khong thu lai, roi thu con ke tiep.
+
+    Luon tra ve seed file RIENG cua task (khong phai file pool): backend chi nhan
+    `seed_file` chu khong nhan chuoi proxy, nen dua ca pool lam seed thi flow tu
+    boc mot proxy bat ky — phot lo proxy da chia + thu tu da tron, va IP hien tren
+    panel se khong phai IP flow thuc su dung.
     """
     if proxy_quality_mode() != "lazy" or not job.filter_proxies:
-        # Tat loc: tra proxy theo thu tu pool, khong cham, khong loai, khong sinh bu.
+        # Tat loc: lay proxy theo thu tu pool, khong cham, khong loai, khong sinh bu.
         proxy = _pick_proxy(job.job_id, proxies, task.task_id)
-        return proxy, fallback_seed, {}
+        return proxy, _task_seed_file(job, task, proxy, proxies), {}
     try:
         import ippure  # noqa: PLC0415
     except Exception:  # noqa: BLE001
         proxy = _pick_proxy(job.job_id, proxies, task.task_id)
-        return proxy, fallback_seed, {}
+        return proxy, _task_seed_file(job, task, proxy, proxies), {}
     if not ippure.enabled():
         proxy = _pick_proxy(job.job_id, proxies, task.task_id)
-        return proxy, fallback_seed, {}
+        return proxy, _task_seed_file(job, task, proxy, proxies), {}
 
     attempts = max(1, int(os.environ.get("UPI_PROXY_TRY") or 4))
     for _ in range(attempts):
@@ -1476,7 +1481,7 @@ def _run_task(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> boo
     # Moi worker tu lay + tu cham proxy cua minh (xem _acquire_proxy): job bat dau
     # ngay, khong con phai cho cham ca pool o POST /api/run. Proxy da verify duoc
     # ghi thanh seed rieng cua task -> ca luong CS cung dung dung IP sach do.
-    proxy, seed, verdict = _acquire_proxy(job, task, proxies, proxy_file)
+    proxy, seed, verdict = _acquire_proxy(job, task, proxies)
     if job.stop_requested:
         _finish(job, task, {"status": "STOPPED", "err": "job stopped"}, time.time())
         return False

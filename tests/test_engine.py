@@ -382,11 +382,22 @@ class ProxyFilterFlagTests(unittest.TestCase):
         job = self.job(filter_proxies=False)
         proxies = ["http://one@h:1", "http://two@h:2"]
         with patch("ippure.check", side_effect=AssertionError("must not probe")) as check:
-            proxy, _, verdict = engine._acquire_proxy(job, self.task(), proxies,
-                                                      Path("seed.txt"))
+            proxy, seed, verdict = engine._acquire_proxy(job, self.task(), proxies)
         check.assert_not_called()
         self.assertEqual((proxy, verdict), (proxies[0], {}))
         self.assertFalse(job.filter_proxies)
+
+    def test_filter_off_still_writes_a_per_task_seed_file(self):
+        # Backend chi nhan seed_file chu khong nhan chuoi proxy: tra ve file pool thi
+        # flow tu boc proxy bat ky -> phot lo proxy da chia va IP hien thi sai.
+        job = self.job(filter_proxies=False)
+        proxies = [f"http://p{i}@h:{i}" for i in range(1, 9)]
+        proxy, seed, _ = engine._acquire_proxy(job, self.task(), proxies)
+        lines = seed.read_text().splitlines()
+        self.assertEqual(seed.name, "web_seed_job1_t1.txt")
+        self.assertEqual(lines[0], proxy)
+        self.assertLessEqual(len(lines), 6)
+        self.assertNotEqual(seed.name, f"web_proxies_{job.job_id}.txt")
 
     def test_filter_on_keeps_the_probe_path(self):
         good = {"ok": True, "country": "IN", "flags": [], "grade": "A", "score": 90,
@@ -395,8 +406,8 @@ class ProxyFilterFlagTests(unittest.TestCase):
         proxy_url = "http://unique-filter-test@h:9"
         with patch("ippure.enabled", return_value=True), \
              patch("ippure.check", return_value=good) as check:
-            proxy, _, verdict = engine._acquire_proxy(self.job(), self.task(),
-                                                      [proxy_url], Path("seed.txt"))
+            proxy, seed, verdict = engine._acquire_proxy(self.job(), self.task(),
+                                                        [proxy_url])
         check.assert_called_once()
         self.assertEqual(proxy, proxy_url)
         self.assertEqual(verdict, good)
