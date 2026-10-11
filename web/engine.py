@@ -851,9 +851,7 @@ def _prepare_proxies(job_id: str, proxies: str | None,
     `UPI_PROXY_QUALITY=pre` -> quay lai cham global truoc khi chay (nhu ban cu).
     """
     if proxies and proxies.strip():
-        # Pool dán tay cũng phải được ghim bang (xem cli.auto_pin_states) —
-        # đường này không đi qua cli.load_proxies nên trước đây bị bỏ sót.
-        px = cli.auto_pin_states(parse_proxy_lines(proxies))
+        px = parse_proxy_lines(proxies)
         label = f"custom proxy pool ({len(px)} proxies)"
     else:
         px = cli.load_proxies(DEFAULT_PROXY_FILE)
