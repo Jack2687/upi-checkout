@@ -171,6 +171,25 @@ Bước đang chạy được tô sáng: nền xanh + viền sáng + vạch acce
 (`@keyframes stepGlow`). Bước xong = xanh lá, thất bại = đỏ. Tiến độ **đơn điệu**
 (chỉ tiến, không lùi) — các vòng retry lặp lại marker nhưng bước đã xong không bị tụt.
 
+## Thử nghiệm vượt `generic_decline` (id phiên Stripe)
+
+`extract_cs.stripe_browser_id()` chỉ sinh chuỗi **cùng định dạng** (`uuid4` + 8 hex) chứ
+chưa từng đăng ký với Stripe, trong khi Stripe.js thật đăng ký phiên tại
+`https://m.stripe.com/6` rồi dùng id do Stripe cấp. Endpoint đó trả id cho cả HTTP client
+thuần, nên có thể thử "đăng ký phiên" trước khi tạo SetupIntent:
+
+```bash
+UPI_STRIPE_TELEMETRY=1 python3 -c "import extract_cs; print(extract_cs.stripe_telemetry_ids())"
+```
+
+Bật `UPI_STRIPE_TELEMETRY=1` → `build_ctx()` dùng `muid/guid/sid` do Stripe cấp (gọi qua
+đúng proxy của task), lỗi mạng thì tự rơi về id ngẫu nhiên như cũ. **Mặc định TẮT** để còn
+A/B: chạy 2 batch account cùng nguồn (1 bật / 1 tắt), so tỉ lệ `generic_decline` mỗi lần chạy.
+
+Lưu ý: TLS fingerprint **đã** là Chrome thật (`curl_cffi` + `impersonate=chrome146` trong
+`new_session`), nên hướng "đổi JA3" không cần làm nữa; đòn còn lại là telemetry id, uy tín
+account, và (đắt nhất) chạy payment element bằng browser thật.
+
 ## Trộn pool proxy (Mix pool order)
 
 `_pick_proxy` chia proxy theo **thứ tự** trong pool (round-robin, để 100 task trên 100

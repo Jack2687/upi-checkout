@@ -568,6 +568,42 @@ def stripe_browser_id() -> str:
     return f"{uuid.uuid4()}{uuid.uuid4().hex[:8]}"
 
 
+def stripe_telemetry_ids(proxy: str = "") -> dict[str, str]:
+    """Xin `muid/guid/sid` THẬT từ https://m.stripe.com/6 (endpoint telemetry của Stripe.js).
+
+    `stripe_browser_id()` chỉ sinh chuỗi CÙNG ĐỊNH DẠNG (`uuid4` + 8 hex) chứ chưa
+    từng đăng ký với Stripe. Stripe.js thật thì đăng ký phiên ở m.stripe.com rồi dùng
+    id do Stripe cấp; id chưa đăng ký ("ghost session") là tín hiệu để Radar chặn
+    SetupIntent (generic_decline). Endpoint này trả id cho cả HTTP client thuần.
+
+    Bật bằng `UPI_STRIPE_TELEMETRY=1` (mặc định TẮT để còn A/B đo tỉ lệ decline).
+    Trả {} khi tắt hoặc khi gọi lỗi -> rơi về id ngẫu nhiên như cũ.
+    """
+    if not env_bool("UPI_STRIPE_TELEMETRY", False):
+        return {}
+    try:
+        session = new_session(proxy, use_pre_proxy=False) if proxy else requests
+        headers = {
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Origin": "https://js.stripe.com",
+            "Referer": "https://js.stripe.com/",
+            "Accept": "*/*",
+            "User-Agent": random_user_agent(),
+        }
+        resp = session.post("https://m.stripe.com/6", json={"v": 2, "d": {}},
+                            headers=headers, timeout=15)
+        data = resp.json() if resp.status_code < 400 else {}
+    except Exception as exc:                      # noqa: BLE001 — lỗi thì chạy như cũ
+        log(f"stripe telemetry: bỏ qua ({type(exc).__name__}: {str(exc)[:80]})", "[WARN] ")
+        return {}
+    ids = {key: str(data.get(key) or "") for key in ("muid", "guid", "sid")}
+    if not all(ids.values()):
+        log(f"stripe telemetry: phản hồi thiếu id ({str(data)[:80]})", "[WARN] ")
+        return {}
+    log("stripe telemetry: đã đăng ký phiên tại m.stripe.com")
+    return ids
+
+
 def build_email(first_name: str, last_name: str) -> str:
     first = re.sub(r"[^a-z]", "", first_name.lower())
     last = re.sub(r"[^a-z]", "", last_name.lower())
@@ -1915,14 +1951,18 @@ def amount_from_payload(payload: Any) -> int:
     return 0
 
 
-def build_ctx(init_payload: dict[str, Any], checkout: dict[str, str]) -> dict[str, Any]:
+def build_ctx(init_payload: dict[str, Any], checkout: dict[str, str],
+              telemetry_proxy: str = "") -> dict[str, Any]:
     client_context = init_payload.get("_client_context") if isinstance(init_payload.get("_client_context"), dict) else {}
+    # Id phiên của Stripe: ưu tiên id THẬT do m.stripe.com cấp (xem
+    # stripe_telemetry_ids), không có thì mới bịa như cũ.
+    tele = stripe_telemetry_ids(telemetry_proxy)
     return {
         "stripe_js_id": str(client_context.get("stripe_js_id") or init_payload.get("client_stripe_js_id") or uuid.uuid4()),
         "client_session_id": str(uuid.uuid4()),
-        "guid": stripe_browser_id(),
-        "muid": stripe_browser_id(),
-        "sid": stripe_browser_id(),
+        "guid": tele.get("guid") or stripe_browser_id(),
+        "muid": tele.get("muid") or stripe_browser_id(),
+        "sid": tele.get("sid") or stripe_browser_id(),
         "elements_session_id": f"elements_session_{uuid.uuid4().hex[:11]}",
         "elements_session_config_id": str(init_payload.get("config_id") or uuid.uuid4()),
         "config_id": init_payload.get("config_id") or "",
@@ -3229,7 +3269,7 @@ def run_provider_flow(
     stripe_pk = checkout.get("stripe_pk") or DEFAULT_STRIPE_PK
 
     def inspect_init(payload: dict[str, Any], stage: str) -> tuple[dict[str, Any], int]:
-        current_ctx = build_ctx(payload, checkout)
+        current_ctx = build_ctx(payload, checkout, provider_proxy)
         current_amount = int(current_ctx.get("checkout_amount") or 0)
         amount_major = current_amount / 100
         log(f"{stage} Stripe init ok, amount={checkout['currency']} {amount_major:.2f}")
@@ -3412,7 +3452,7 @@ def run_provider_flow(
         log(f"no redirect after approve/confirm; refreshing Stripe init and doing second confirm: {str(exc)[:180]}", "[WARN] ")
         init_payload = stripe_init(checkout["cs_id"], stripe_pk, provider_proxy)
         hosted_url = str(init_payload.get("stripe_hosted_url") or hosted_url or "")
-        ctx = build_ctx(init_payload, checkout)
+        ctx = build_ctx(init_payload, checkout, provider_proxy)
         confirm_payload = stripe_confirm_upi(stripe, checkout["cs_id"], pm_id, stripe_pk, init_payload, ctx, checkout, hosted_url, billing)
         log("second Stripe confirm ok; parsing redirect...")
         log_payment_page_summary("second_confirm", confirm_payload)
