@@ -46,8 +46,6 @@ const MODE_HINTS = {
 //   - raw status của luồng (task_done.status / snapshot.raw_status): LINK | FAIL |
 //     TIMEOUT | error | no_promo | taxes_fail | ct_fail | ...
 // CHỈ 'LINK' là thành công (có link/QR để quét). Mọi raw status khác đều là thất bại.
-// Trần token mỗi batch — phải khớp MAX_TOKENS_PER_BATCH bên web/engine.py.
-const MAX_TOKENS = 1000;
 // Trần worker — phải khớp validation trong web/app.py (server là nơi phán cuối).
 const MAX_WORKERS = 300;
 
@@ -2354,10 +2352,6 @@ function attachJob(jobId, snapshot) {
 async function runJob() {
   const tokens = getTokens();
   if (!tokens.length) return;
-  if (tokens.length > MAX_TOKENS) {
-    toast('Max ' + MAX_TOKENS + ' tokens per batch.');
-    return;
-  }
   const w = readWorkers();
   const workers = w.value;
   if (w.clamped) toast('Worker limit is ' + MAX_WORKERS + ' — you entered ' + w.raw + '.');

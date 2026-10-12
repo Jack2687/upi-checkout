@@ -46,9 +46,10 @@ _LOG_DIR_ENV = os.environ.get("UPI_WEB_LOG_DIR", "").strip()
 LOG_DIR = Path(_LOG_DIR_ENV) if _LOG_DIR_ENV else ROOT / "logs"
 MAX_JOBS = 20
 MAX_LOGS_PER_TASK = 200
-# Trần số access token mỗi batch. 1000 task × ~200s / 20 worker ≈ 3 tiếng;
-# snapshot bị cắt log theo `Job._log_tail()` để payload không phình theo.
-MAX_TOKENS_PER_BATCH = 1000
+# Trần số access token mỗi batch: MẶC ĐỊNH KHÔNG GIỚI HẠN (0).
+# Task đang chờ chỉ là 1 record nhỏ (chỉ task đang chạy mới tốn ~26 MB), nhưng
+# snapshot/results.json phình ~4 KB mỗi task -> đặt UPI_MAX_BATCH=<n> nếu muốn chặn.
+MAX_TOKENS_PER_BATCH = int(os.environ.get("UPI_MAX_BATCH") or 0)
 MAX_WORKERS = 300
 SUBSCRIBER_QUEUE = 5000
 
@@ -1706,7 +1707,7 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
     tokens = [t.strip() for t in tokens if t.strip()]
     if not tokens:
         raise ValueError("no tokens")
-    if len(tokens) > MAX_TOKENS_PER_BATCH:
+    if MAX_TOKENS_PER_BATCH and len(tokens) > MAX_TOKENS_PER_BATCH:
         raise ValueError(f"max {MAX_TOKENS_PER_BATCH} tokens per batch")
     if not 1 <= workers <= MAX_WORKERS:
         raise ValueError(f"workers must be within 1..{MAX_WORKERS}")
@@ -1838,7 +1839,7 @@ def append_tasks(job_id: str, tokens: list[str]) -> dict:
             fresh.append(tok)
         if not fresh:
             return {"ok": True, "added": 0, "skipped": skipped, "total": job.total}
-        if len(job.tasks) + len(fresh) > MAX_TOKENS_PER_BATCH:
+        if MAX_TOKENS_PER_BATCH and len(job.tasks) + len(fresh) > MAX_TOKENS_PER_BATCH:
             return {"ok": False, "added": 0, "skipped": skipped,
                     "error": f"max {MAX_TOKENS_PER_BATCH} tokens per batch"}
 

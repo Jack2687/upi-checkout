@@ -169,6 +169,19 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(job.total, 2)
 
+    def test_no_batch_limit_by_default_and_append_is_unbounded(self):
+        # Mặc định MAX_TOKENS_PER_BATCH = 0 -> không chặn; chỉ chặn khi đặt UPI_MAX_BATCH.
+        self.assertEqual(engine.MAX_TOKENS_PER_BATCH, 0)
+        gate = threading.Event()
+        self.gates.append(gate)
+        job = self.start(20, workers=1)
+        result = engine.append_tasks(job.job_id, [f"new-{i}" for i in range(30)])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(job.total, 50)
+        gate.set()
+        wait_for(lambda: job.status == "done")
+        self.assertEqual(len(self.calls), 50)
+
     def test_parallel_jobs_use_separate_state_paths(self):
         first, second = self.start(), self.start()
         a = engine._backend_request(first, first.tasks["t1"], "", self.seed)
