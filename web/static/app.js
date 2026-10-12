@@ -49,7 +49,7 @@ const MODE_HINTS = {
 // Trần token mỗi batch — phải khớp MAX_TOKENS_PER_BATCH bên web/engine.py.
 const MAX_TOKENS = 1000;
 // Trần worker — phải khớp validation trong web/app.py (server là nơi phán cuối).
-const MAX_WORKERS = 200;
+const MAX_WORKERS = 300;
 
 // Số nhiều tiếng Anh: 1 task / 2 tasks. Dùng cho mọi chuỗi có đếm.
 function plural(n) { return n === 1 ? '' : 's'; }

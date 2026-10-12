@@ -62,9 +62,9 @@
       <div class="section execution-settings">
         <div class="field worker-field">
           <label class="section-label" for="workers">Worker song song</label>
-          <input id="workers" type="number" value="4" min="1" max="200" aria-describedby="workers-help">
+          <input id="workers" type="number" value="4" min="1" max="300" aria-describedby="workers-help">
         </div>
-        <div class="helper" id="workers-help">1–200 workers. Raise gradually by RAM and connections; each worker runs one task.</div>
+        <div class="helper" id="workers-help">1–300 workers. Each in-flight worker costs ~26 MB RAM (measured: 200 workers ≈ 5 GB). Raise gradually; the pool should have at least as many proxies as workers.</div>
       </div>
 
       <!-- Proxy pool -->

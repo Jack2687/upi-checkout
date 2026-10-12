@@ -7,7 +7,7 @@ theo thời gian thực, biết mỗi task đang chạy **luồng backend nào**
 
 - Mỗi job dùng **một `ThreadPoolExecutor`** chung cho batch ban đầu, thêm task và
   retry. Task chờ nằm trong queue, không tạo thread chờ riêng cho mỗi lần thêm.
-- `workers`: 1–200 **mỗi job**; batch tối đa 1.000 task, kể cả task thêm vào.
+- `workers`: 1–300 **mỗi job**; batch tối đa 1.000 task, kể cả task thêm vào.
   Tăng worker dần theo RAM và kết nối; giới hạn 200 không phải khuyến nghị chạy 200
   tiến trình CS trên mọi máy. Nhiều job cùng lúc cộng dồn tài nguyên.
 - Không retry trùng task đang chờ/chạy. Chỉ đóng job khi mọi task đã hoàn tất,

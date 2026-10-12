@@ -49,7 +49,7 @@ MAX_LOGS_PER_TASK = 200
 # Trần số access token mỗi batch. 1000 task × ~200s / 20 worker ≈ 3 tiếng;
 # snapshot bị cắt log theo `Job._log_tail()` để payload không phình theo.
 MAX_TOKENS_PER_BATCH = 1000
-MAX_WORKERS = 200
+MAX_WORKERS = 300
 SUBSCRIBER_QUEUE = 5000
 
 # trang thai coi la thanh cong.
