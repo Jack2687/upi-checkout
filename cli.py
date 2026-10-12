@@ -910,6 +910,11 @@ def is_risk_decline(lines: list[str]) -> bool:
     return False
 
 
+def is_checkout_blocked(lines: list[str]) -> bool:
+    """OpenAI trả HTTP 403 ngay khi tạo checkout (chưa hề chạm Stripe)."""
+    return any("checkout creation failed http 403" in l.lower() for l in lines)
+
+
 def classify_cs_outcome(lines: list[str], stage: str, err: str | None,
                         approve_ok: bool, promo: str = "off",
                         ) -> tuple[str, str | None, str, bool]:
@@ -945,7 +950,12 @@ def classify_cs_outcome(lines: list[str], stage: str, err: str | None,
 
     if not err and not link and not approve_ok:
         tail = next((l.strip() for l in reversed(lines) if l.strip()), "")
-        if not lines:
+        # Bị chặn NGAY ở bước tạo checkout (OpenAI trả 403) khác hẳn "hết đường ở
+        # approve": lỗi cũ chỉ ghi "flow stopped at step 'approve' | last log …" nên
+        # đọc UI tưởng lỗi ở Stripe. Nêu đúng nguyên nhân để biết chặn ở đâu.
+        if is_checkout_blocked(lines):
+            err = "OpenAI blocked checkout creation (HTTP 403) — never reached Stripe"
+        elif not lines:
             err = "extract_cs produced no output"
         else:
             err = f"no link — flow stopped at step '{stage}'"
