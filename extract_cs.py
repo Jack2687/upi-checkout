@@ -1429,6 +1429,17 @@ def _redact_text(text: str, limit: int | None = None) -> str:
     return text
 
 
+def html_excerpt(text: str, limit: int = 260) -> str:
+    """Rút phần CHỮ của trang lỗi HTTP (bỏ CSS/JS) để log đọc được.
+
+    Trang 403 của Cloudflare/OpenAI mở đầu bằng khối <style> rất dài, nên cắt 500 ký tự
+    đầu chỉ ra toàn CSS — không biết ai chặn, vì sao. Bỏ style/script rồi mới cắt.
+    """
+    clean = re.sub(r"<(style|script)[^>]*>.*?</\1>", " ", str(text or ""), flags=re.S | re.I)
+    clean = re.sub(r"<[^>]+>", " ", clean)
+    return re.sub(r"\s+", " ", clean).strip()[:limit]
+
+
 def dump_http(
     response: requests.Response | None,
     stage: str,
@@ -1727,6 +1738,8 @@ def create_checkout(chatgpt: requests.Session, country: str) -> dict[str, str]:
     if resp.status_code >= 400:
         if is_user_already_paid_error(resp.text):
             raise RuntimeError("User is already paid")
+        log(f"checkout bi chan HTTP {resp.status_code} | server={resp.headers.get('server', '?')} "
+            f"cf-ray={resp.headers.get('cf-ray', '-')} | {html_excerpt(resp.text)}", "[WARN] ")
         raise RuntimeError(f"checkout creation failed HTTP {resp.status_code}: {resp.text[:500]}")
 
     data = resp.json() or {}
