@@ -81,6 +81,7 @@ const els = {
   btnRefresh: document.getElementById('btn-refresh'),
   pushQueue: document.getElementById('push-queue'),
   pushQueueCount: document.getElementById('push-queue-count'),
+  queueStatus: document.getElementById('queue-status'),
   btnCopyEmails: document.getElementById('btn-copy-emails'),
   btnCopyEmailsLabel: document.getElementById('btn-copy-emails-label'),
   btnClearTab: document.getElementById('btn-clear-tab'),
@@ -1516,6 +1517,19 @@ function renderCounters() {
     if (el) el.textContent = c[f.key];
   }
 
+  // Trạng thái hàng đợi CỦA JOB ngay cạnh nút Push: nút Push chỉ nói số token trong ô
+  // nhập, không nói job đã nhận bao nhiêu -> sau khi push dễ tưởng "chỉ nhận một phần".
+  if (els.queueStatus) {
+    if (state.jobId) {
+      els.queueStatus.hidden = false;
+      els.queueStatus.textContent = 'Job ' + state.jobId + ': ' + c.running + ' running · '
+        + c.queued + ' queued · ' + total + ' total';
+    } else {
+      els.queueStatus.hidden = true;
+      els.queueStatus.textContent = '';
+    }
+  }
+
   applyFilter();
   updateEmptyState();
   updateQueueLoading();
@@ -2483,8 +2497,16 @@ async function pushToQueue() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) { toast(data.detail || 'Push failed'); return; }
-    const skipped = data.skipped ? (' — skipped ' + data.skipped + ' duplicates') : '';
-    toast('Pushed ' + data.added + ' accounts into the queue' + skipped);
+    // Nói rõ VÌ SAO bị bỏ qua: token đã có trong CHÍNH job này (mỗi AT chỉ chạy 1 lần),
+    // nếu không thì "Pushed 218 — skipped 282" dễ bị đọc thành "chỉ nhận 218".
+    if (data.added === 0 && data.skipped) {
+      toast('Nothing added: all ' + data.skipped + ' tokens are already in this job');
+    } else {
+      const skipped = data.skipped
+        ? (' · skipped ' + data.skipped + ' already in this job') : '';
+      const total = data.total != null ? (' · job now ' + data.total + ' tasks') : '';
+      toast('Pushed ' + data.added + ' accounts' + skipped + total);
+    }
   } catch (e) {
     toast('Push failed');
   } finally {
