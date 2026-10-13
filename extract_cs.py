@@ -54,6 +54,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 from threading import Event, RLock, local
 from typing import Any, Callable, Mapping
@@ -127,6 +128,7 @@ def execution_context(settings: Mapping[str, str], *,
         "net": {"out": 0, "in": 0, "requests": 0},
     }
     _run_context.value = context
+    install_net_counters()
     try:
         check_cancelled()
         yield
@@ -148,6 +150,71 @@ def _count_net(out: int, inc: int) -> None:
     net["out"] += int(out)
     net["in"] += int(inc)
     net["requests"] += 1
+
+
+def _count_request_bytes(value: Any) -> int:
+    """Kích thước phần body/query của 1 request (để tính dung lượng gửi đi)."""
+    if value is None:
+        return 0
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode("utf-8", "ignore"))
+    if isinstance(value, (dict, list, tuple)):
+        # curl_cffi/requests serialize `json=` bên trong nên phải tự đo.
+        try:
+            return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return 0
+    return 0
+
+
+def _counting_request(original: Any) -> Any:
+    """Bọc `Session.request` để đếm dung lượng, KHÔNG đổi hành vi request."""
+
+    @wraps(original)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        sent = (_count_request_bytes(kwargs.get("data"))
+                + _count_request_bytes(kwargs.get("json"))
+                + _count_request_bytes(kwargs.get("params")))
+        response = original(self, *args, **kwargs)
+        try:
+            head = response.headers.get("Content-Length")
+            received = int(head) if head and str(head).isdigit() else len(response.content or b"")
+        except Exception:  # noqa: BLE001 — đo được thì tốt, lỗi thì bỏ qua
+            received = 0
+        _count_net(sent, received)
+        return response
+
+    return wrapper
+
+
+_net_counters_installed = False
+
+
+def install_net_counters() -> None:
+    """Đếm dung lượng MỌI request HTTP của flow, ở tầng class (chạy 1 lần).
+
+    Vì sao không đếm ở session của task: rất nhiều chỗ gọi thẳng
+    `requests.post/get` (Stripe trong cli.py) hoặc tự tạo session
+    (geobilling_http) — không đi qua `new_session()`. Đo thực tế khi chỉ bọc
+    session của task: task RA ĐƯỢC LINK cũng chỉ hiện 10–16 request ≈ 0,1 MB,
+    thiếu phần lớn traffic.
+    """
+    global _net_counters_installed
+    if _net_counters_installed:
+        return
+    targets = [requests.sessions.Session]
+    if CurlCffiSession is not None:
+        targets.append(CurlCffiSession)
+    for cls in targets:
+        original = getattr(cls, "request", None)
+        if original is None or getattr(original, "_net_counting", False):
+            continue
+        wrapper = _counting_request(original)
+        wrapper._net_counting = True          # type: ignore[attr-defined]
+        cls.request = wrapper                  # type: ignore[method-assign]
+    _net_counters_installed = True
 
 
 def net_usage() -> dict[str, int]:
@@ -1403,33 +1470,9 @@ def _guard_session_stop(session: Any) -> Any:
     """
     original = session.request
 
-    def _size(value: Any) -> int:
-        if value is None:
-            return 0
-        if isinstance(value, (bytes, bytearray)):
-            return len(value)
-        if isinstance(value, str):
-            return len(value.encode("utf-8", "ignore"))
-        if isinstance(value, (dict, list, tuple)):
-            # curl_cffi serialize `json=` bên trong nên ở đây phải tự đo.
-            try:
-                return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
-            except Exception:  # noqa: BLE001
-                return 0
-        return 0
-
     def guarded(*args: Any, **kwargs: Any) -> Any:
         check_cancelled()
-        request_size = (_size(kwargs.get("data")) + _size(kwargs.get("json"))
-                        + _size(kwargs.get("params")))
-        response = original(*args, **kwargs)
-        try:
-            head = response.headers.get("Content-Length")
-            body = int(head) if head and head.isdigit() else len(response.content or b"")
-        except Exception:  # noqa: BLE001 — đo được thì tốt, lỗi thì thôi
-            body = 0
-        _count_net(request_size, body)
-        return response
+        return original(*args, **kwargs)
 
     try:
         session.request = guarded

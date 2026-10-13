@@ -446,10 +446,6 @@ class ProxyFilterFlagTests(unittest.TestCase):
         self.assertNotEqual(on_report["mode"], "off")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RetryPolicyTests(unittest.TestCase):
     """403 ở bước tạo checkout -> không retry (retry chỉ tốn proxy)."""
 
@@ -477,28 +473,58 @@ class RetryPolicyTests(unittest.TestCase):
 
 
 class NetUsageTests(unittest.TestCase):
-    """Đo dung lượng proxy mỗi acc: byte vào/ra + số request."""
+    """Đo dung lượng proxy mỗi acc: byte vào/ra + số request (bọc ở tầng class)."""
 
-    def test_counter_accumulates_bytes_per_execution(self):
+    @staticmethod
+    def _stub_transport(body: bytes):
+        import requests
+        from requests.models import Response
+
+        def fake_send(self, request, **kwargs):
+            resp = Response()
+            resp.status_code = 200
+            resp._content = body
+            resp.headers["Content-Length"] = str(len(body))
+            resp.request = request
+            return resp
+
+        return patch.object(requests.adapters.HTTPAdapter, "send", fake_send)
+
+    def test_counter_covers_module_level_calls_and_sessions(self):
+        import requests
         import extract_cs as ex
 
-        class Resp:
-            headers = {"Content-Length": "2048"}
-            content = b"x" * 2048
-
-        class Session:
-            def request(self, *a, **kw):
-                return Resp()
-
-        with ex.execution_context({"UPI_TOKEN": "t"}):
-            session = ex._guard_session_stop(Session())
-            session.request("POST", "https://api.stripe.com/x", data=b"a" * 300)
-            session.request("POST", "https://api.stripe.com/y", json={"k": "v"})
-            usage = ex.net_usage()
-        self.assertEqual(usage["in"], 4096)
-        self.assertGreater(usage["out"], 300)      # json body cũng phải được đếm
+        with self._stub_transport(b"y" * 2048):
+            with ex.execution_context({"UPI_TOKEN": "t"}):
+                # gọi thẳng requests.post (cli.py làm vậy cho Stripe) ...
+                requests.post("https://api.stripe.com/v1/payment_pages/x/init", data={"k": "v"})
+                # ... và qua session tự tạo (không đi qua new_session)
+                requests.Session().get("https://chatgpt.com/backend-api/me")
+                usage = ex.net_usage()
+        self.assertEqual(usage["in"], 4096)          # 2 request × 2048 byte
         self.assertEqual(usage["requests"], 2)
+        self.assertGreater(usage["out"], 0)          # body gửi đi cũng phải được đếm
         self.assertEqual(ex.net_usage(), {"out": 0, "in": 0, "requests": 0})
+
+    def test_counter_covers_both_http_clients(self):
+        # curl_cffi là client chính của flow, requests là client phụ (cli.py/geobilling).
+        import requests
+        import extract_cs as ex
+        with ex.execution_context({}):
+            pass
+        self.assertTrue(getattr(requests.sessions.Session.request, "_net_counting", False))
+        try:
+            from curl_cffi.requests import Session as CurlSession
+        except ImportError:
+            self.skipTest("curl_cffi không có")
+        self.assertTrue(getattr(CurlSession.request, "_net_counting", False))
+
+    def test_size_helper_understands_json_bodies(self):
+        import extract_cs as ex
+        self.assertEqual(ex._count_request_bytes(b"abc"), 3)
+        self.assertEqual(ex._count_request_bytes("abcd"), 4)
+        self.assertGreater(ex._count_request_bytes({"a": "b"}), 5)
+        self.assertEqual(ex._count_request_bytes(None), 0)
 
     def test_finish_stores_usage_on_the_task(self):
         job = engine.Job("job1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
@@ -508,3 +534,7 @@ class NetUsageTests(unittest.TestCase):
                                    "net_requests": 42}, time.time())
         self.assertEqual((task.net_out, task.net_in, task.net_requests), (1234, 567890, 42))
         self.assertEqual(task.to_dict()["net_in"], 567890)
+
+
+if __name__ == "__main__":
+    unittest.main()
