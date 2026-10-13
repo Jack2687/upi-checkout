@@ -143,6 +143,11 @@ class Task:
     billing_name: str = ""           # tên trên hoá đơn (để đo trùng lặp tên)
     billing_city: str = ""
     billing_pin: str = ""
+    # Dung lượng proxy đã dùng cho acc này (byte vào/ra + số request). Đo trong
+    # extract_cs._count_net; giúp trả lời "mỗi acc tốn bao nhiêu MB proxy".
+    net_out: int = 0
+    net_in: int = 0
+    net_requests: int = 0
     no_retry: bool = False           # lỗi cấp account -> đừng retry (risk decline)
     no_retry_reason: str = ""
     done_at: int = 0                 # epoch lúc task xong -> UI sắp tab Success theo mốc này
@@ -201,6 +206,9 @@ class Task:
             "geo_state": self.geo_state,
             "geo_city": self.geo_city,
             "geo_pin": self.geo_pin,
+            "net_out": self.net_out,
+            "net_in": self.net_in,
+            "net_requests": self.net_requests,
             "billing_name": self.billing_name,
             "billing_city": self.billing_city,
             "billing_pin": self.billing_pin,
@@ -1433,6 +1441,11 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
         task.no_retry_reason = "account not eligible for ₹0 promo"
         job.promo_not_eligible_count += 1
 
+    # Dung lượng proxy mà acc này đã tiêu (byte) — cộng dồn nếu task chạy nhiều lần.
+    task.net_out += int(result.get("net_bytes_out") or 0)
+    task.net_in += int(result.get("net_bytes_in") or 0)
+    task.net_requests += int(result.get("net_requests") or 0)
+
     link = result.get("upi_link") or ""
     _verify_link(job, task, result, link)
 
@@ -1463,7 +1476,9 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
     task.done_at = int(time.time())
     job.emit({"type": "task_done", "task_id": task.task_id, "ok": ok,
               "status": task.raw_status, "error": task.error,
-              "duration_ms": task.duration_ms, "done_at": task.done_at})
+              "duration_ms": task.duration_ms, "done_at": task.done_at,
+              "net_out": task.net_out, "net_in": task.net_in,
+              "net_requests": task.net_requests})
     job.emit({"type": "job_progress", "job_id": job.job_id, "done": job.done,
               "ok": job.ok, "fail": job.fail, "total": job.total})
 
@@ -1592,6 +1607,7 @@ def _reset_task_for_retry(job: Job, task: Task) -> None:
     task.link_zero = False
     task.no_retry = False
     task.no_retry_reason = ""
+    task.net_out = task.net_in = task.net_requests = 0   # đo lại cho lần chạy mới
     task.egress = None
     # Xoá hoá đơn của lần chạy trước: dữ liệu lưu lại phải là của LẦN CHẠY CUỐI,
     # nếu không thì task retry xong vẫn mang vùng/PIN của lần 1 (đọc sai vùng nào ra mã).

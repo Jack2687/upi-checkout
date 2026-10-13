@@ -448,3 +448,37 @@ class ProxyFilterFlagTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NetUsageTests(unittest.TestCase):
+    """Đo dung lượng proxy mỗi acc: byte vào/ra + số request."""
+
+    def test_counter_accumulates_bytes_per_execution(self):
+        import extract_cs as ex
+
+        class Resp:
+            headers = {"Content-Length": "2048"}
+            content = b"x" * 2048
+
+        class Session:
+            def request(self, *a, **kw):
+                return Resp()
+
+        with ex.execution_context({"UPI_TOKEN": "t"}):
+            session = ex._guard_session_stop(Session())
+            session.request("POST", "https://api.stripe.com/x", data=b"a" * 300)
+            session.request("POST", "https://api.stripe.com/y", json={"k": "v"})
+            usage = ex.net_usage()
+        self.assertEqual(usage["in"], 4096)
+        self.assertGreater(usage["out"], 300)      # json body cũng phải được đếm
+        self.assertEqual(usage["requests"], 2)
+        self.assertEqual(ex.net_usage(), {"out": 0, "in": 0, "requests": 0})
+
+    def test_finish_stores_usage_on_the_task(self):
+        job = engine.Job("job1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        engine._finish(job, task, {"status": "FAIL", "err": "x",
+                                   "net_bytes_out": 1234, "net_bytes_in": 567890,
+                                   "net_requests": 42}, time.time())
+        self.assertEqual((task.net_out, task.net_in, task.net_requests), (1234, 567890, 42))
+        self.assertEqual(task.to_dict()["net_in"], 567890)

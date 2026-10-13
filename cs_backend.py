@@ -207,6 +207,11 @@ def run_in_process(
                     proxy_seeds,
                     stop_event=stop_event,
                 )
+                # Dung lượng proxy của RIÊNG task này (mọi request qua session của nó).
+                net = extract_cs.net_usage()
+                result.data["net_bytes_out"] = net["out"]
+                result.data["net_bytes_in"] = net["in"]
+                result.data["net_requests"] = net["requests"]
         except BaseException as exc:  # report to the caller; never leak a thread
             worker_error.append(exc)
             result.error = str(exc)[:300]

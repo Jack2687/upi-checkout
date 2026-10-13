@@ -122,6 +122,9 @@ def execution_context(settings: Mapping[str, str], *,
         "on_result": on_result, "should_stop": should_stop,
         "deadline": time.monotonic() + timeout if timeout and timeout > 0 else None,
         "proxy_state": None, "redaction_values": set(), "sessions": [],
+        # Dung lượng proxy: mọi request qua session của task đều cộng vào đây (xem
+        # _count_net) -> biết mỗi acc tốn bao nhiêu MB qua proxy.
+        "net": {"out": 0, "in": 0, "requests": 0},
     }
     _run_context.value = context
     try:
@@ -134,6 +137,25 @@ def execution_context(settings: Mapping[str, str], *,
             except Exception:
                 pass
         _run_context.value = previous
+
+
+def _count_net(out: int, inc: int) -> None:
+    """Cộng dung lượng 1 request vào context đang chạy (bỏ qua nếu không có)."""
+    context = getattr(_run_context, "value", None)
+    net = context.get("net") if context else None
+    if not net:
+        return
+    net["out"] += int(out)
+    net["in"] += int(inc)
+    net["requests"] += 1
+
+
+def net_usage() -> dict[str, int]:
+    """Dung lượng proxy đã dùng trong execution context hiện tại (byte)."""
+    context = getattr(_run_context, "value", None)
+    net = (context or {}).get("net") or {}
+    return {"out": int(net.get("out") or 0), "in": int(net.get("in") or 0),
+            "requests": int(net.get("requests") or 0)}
 
 
 def emit_result(**values: Any) -> None:
@@ -1381,9 +1403,33 @@ def _guard_session_stop(session: Any) -> Any:
     """
     original = session.request
 
+    def _size(value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, (bytes, bytearray)):
+            return len(value)
+        if isinstance(value, str):
+            return len(value.encode("utf-8", "ignore"))
+        if isinstance(value, (dict, list, tuple)):
+            # curl_cffi serialize `json=` bên trong nên ở đây phải tự đo.
+            try:
+                return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+            except Exception:  # noqa: BLE001
+                return 0
+        return 0
+
     def guarded(*args: Any, **kwargs: Any) -> Any:
         check_cancelled()
-        return original(*args, **kwargs)
+        request_size = (_size(kwargs.get("data")) + _size(kwargs.get("json"))
+                        + _size(kwargs.get("params")))
+        response = original(*args, **kwargs)
+        try:
+            head = response.headers.get("Content-Length")
+            body = int(head) if head and head.isdigit() else len(response.content or b"")
+        except Exception:  # noqa: BLE001 — đo được thì tốt, lỗi thì thôi
+            body = 0
+        _count_net(request_size, body)
+        return response
 
     try:
         session.request = guarded

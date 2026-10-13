@@ -197,6 +197,7 @@ function newTask(taskId) {
     duration_ms: null,
     run: 1,
     egress: null,           // {ip, location, probed_at}
+    netOut: 0, netIn: 0, netRequests: 0,   // dung luong proxy da dung (byte)
     billing: null,          // {billing_name, billing_city, billing_pin, geo_*}
     artifact: null,         // {upi_link, qr_png, qr_svg, amount_minor, intent}
     // Acc đã lên Plus chưa. Server chỉ bắt đầu dò khi khách DUYỆT MANDATE
@@ -513,6 +514,14 @@ function flowCardHtml(t) {
     html += '</div>';
   }
   html += billingHtml(t);
+  if (t.netIn || t.netOut) {
+    // Dung lượng proxy acc này đã tiêu (đo trong extract_cs._count_net).
+    html += '<div class="egress"><div class="egress-title muted">Proxy traffic</div>'
+      + '<div class="egress-row"><span>Download</span><span class="mono">' + fmtBytes(t.netIn) + '</span></div>'
+      + (t.netOut ? '<div class="egress-row"><span>Upload</span><span class="mono">' + fmtBytes(t.netOut) + '</span></div>' : '')
+      + (t.netRequests ? '<div class="egress-row"><span>Requests</span><span class="mono">' + t.netRequests + '</span></div>' : '')
+      + '</div>';
+  }
   return html + '</div>';
 }
 
@@ -2076,6 +2085,13 @@ function onBilling(evt) {
   queueTaskRender(t);
 }
 
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
+}
+
 function fmtGeo(g) {
   if (!g) return '';
   return [g.city, g.region, g.country].filter(Boolean).join(', ');
@@ -2166,6 +2182,9 @@ function onTaskDone(evt) {
   if (evt.updated_at) t.updated_at = evt.updated_at;
   // Mốc xong: dùng số của server; server cũ không gửi thì lấy giờ máy.
   t.doneAt = evt.done_at || Math.floor(Date.now() / 1000);
+  if (evt.net_in != null) t.netIn = evt.net_in;
+  if (evt.net_out != null) t.netOut = evt.net_out;
+  if (evt.net_requests != null) t.netRequests = evt.net_requests;
   queueTaskRender(t, true, state.filter === 'success');
   // Task vừa ra link QR -> kêu + báo tên account. Mắt không thể canh 1000 dòng.
   if (t.status === 'success' && !t.notified) {
@@ -2303,6 +2322,9 @@ function applySnapshot(data) {
     t.egress = td.egress || null;
     // Hoá đơn cũng phải đọc từ snapshot, nếu không F5 xong khối "Billing details" biến mất.
     t.billing = billingFromTask(td);
+    t.netOut = td.net_out || 0;
+    t.netIn = td.net_in || 0;
+    t.netRequests = td.net_requests || 0;
     t.artifact = td.artifact || null;
     // Kết luận của server về link (succeeded/failed/...) — snapshot mang sẵn,
     // trước đây bị bỏ nên sau F5 card chỉ còn biết kết quả lần dò của chính nó.
