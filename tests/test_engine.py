@@ -450,6 +450,32 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class RetryPolicyTests(unittest.TestCase):
+    """403 ở bước tạo checkout -> không retry (retry chỉ tốn proxy)."""
+
+    def finish(self, err):
+        job = engine.Job("job1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        engine._finish(job, task, {"status": "FAIL", "err": err}, time.time())
+        return task
+
+    def test_checkout_403_marks_no_retry(self):
+        t = self.finish("OpenAI blocked checkout creation (HTTP 403) — never reached Stripe")
+        self.assertTrue(t.no_retry)
+        self.assertIn("403", t.no_retry_reason)
+
+    def test_other_errors_still_retry(self):
+        t = self.finish("no link — flow stopped at step 'approve'")
+        self.assertFalse(t.no_retry)
+
+    def test_risk_decline_keeps_its_own_reason(self):
+        job = engine.Job("job1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        engine._finish(job, task, {"status": "FAIL", "err": "risk decline",
+                                   "risk_decline": True}, time.time())
+        self.assertEqual(task.no_retry_reason, "Stripe risk decline (account flagged)")
+
+
 class NetUsageTests(unittest.TestCase):
     """Đo dung lượng proxy mỗi acc: byte vào/ra + số request."""
 

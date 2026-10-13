@@ -1435,6 +1435,12 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
         task.no_retry = True
         task.no_retry_reason = "Stripe risk decline (account flagged)"
         job.risk_decline_count += 1
+    elif "blocked checkout creation" in (task.error or ""):
+        # Cloudflare chặn ngay bước tạo checkout: lần chạy lại gần như chắc chắn bị chặn
+        # tiếp (đo thật 12 job gần nhất: 2.209 lần thử lại sau 403 -> 0 lần ra link),
+        # nên retry chỉ đốt thêm dung lượng proxy. Bỏ retry cho tới khi hết sóng 403.
+        task.no_retry = True
+        task.no_retry_reason = "checkout blocked HTTP 403 (Cloudflare) — retry wastes proxy"
     elif result.get("promo_not_eligible"):
         # Account không được hưởng promo 0₫ -> chạy lại cũng vậy, khỏi tốn ~2 phút nữa.
         task.no_retry = True
