@@ -2259,6 +2259,49 @@ def stripe_elements_session_params(ctx: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def billing_address_ok(proxy: str) -> tuple[bool, str]:
+    """Proxy này có dựng được địa chỉ hoá đơn không? (Không raise.)
+
+    Dùng ở TẦNG CHỌN PROXY: proxy không ra được địa chỉ thì loại ngay như proxy chết, thay vì
+    để task chạy hết checkout rồi mới chết ở bước điền billing — lúc đó retry là phải chạy lại
+    cả flow (đắt như dính risk decline).
+    """
+    if not proxy:
+        return False, "no proxy"
+    try:
+        upi_billing_profile(proxy)
+        return True, ""
+    except BillingAddressUnavailable as exc:
+        return False, str(exc)[:120]
+    except Exception as exc:  # noqa: BLE001 — lỗi lạ thì coi như không kiểm tra được
+        return True, f"check skipped ({type(exc).__name__})"
+
+
+def billing_for_round(candidates: list[str]) -> dict[str, Any]:
+    """Dựng billing theo proxy, proxy nào KHÔNG ra được địa chỉ thì đổi proxy khác.
+
+    Vì sao: không dựng được địa chỉ hầu như luôn do IP exit không định vị được (ipwho bị
+    rate-limit, reverse geocode trả rỗng, PIN không tra được) — đổi sang proxy/session khác
+    là xong. Trước đây lỗi này ném thẳng ra và mất CẢ task dù pool còn hàng trăm proxy.
+    Chỉ khi thử hết danh sách mà vẫn không được thì mới bỏ task.
+    """
+    tried: list[str] = []
+    last: Exception | None = None
+    for proxy in candidates:
+        if not proxy or proxy in tried:
+            continue
+        tried.append(proxy)
+        try:
+            return upi_billing_profile(proxy)
+        except BillingAddressUnavailable as exc:
+            last = exc
+            log(f"billing: proxy {proxy_label(proxy)} không dựng được địa chỉ "
+                f"({str(exc)[:70]}) — thử proxy khác", "[WARN] ")
+    raise BillingAddressUnavailable(
+        f"no billing address from any of {len(tried)} prox(ies)"
+        + (f": {last}" if last else ""))
+
+
 def pin_area_name(pin: str) -> str:
     """Tên bưu cục/khu vực THẬT của PIN (India Post). Rỗng nếu không tra được."""
     if not pin:
@@ -3920,7 +3963,7 @@ def run_once(
     device_id = new_device_id(access_token)
     checkout_country = normalize_country(env_value("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
     # Địa chỉ phải khớp IP của chặng gửi PM/tax/approve -> dùng provider proxy
-    billing = upi_billing_profile(provider_proxy or checkout_proxy)
+    billing = billing_for_round([provider_proxy, checkout_proxy, promotion_proxy])  # cùng 1 sticky session
     log(f"starting UPI extraction, attempt {attempt}/{max_retry}")
     log(
         "combo test: "
@@ -4154,7 +4197,7 @@ def run_single_link_attempt(
     try:
         if stop_event.is_set():
             return attempt, "", "task stopped; skipping this round", False
-        billing = upi_billing_profile((provider_proxies or checkout_proxies or [""])[0])
+        billing = billing_for_round(list(provider_proxies or []) + list(checkout_proxies or []))
         pm_country = billing["country"]
         device_id = new_device_id(access_token)
         checkout_candidates = pick_random_proxies(checkout_proxies, checkout_retry, "checkout")
@@ -4407,7 +4450,7 @@ def run_single_link_mode(
     )
 
     for attempt in range(1, upi_retry + 1):
-        billing = upi_billing_profile(proxy_seeds[0] if proxy_seeds else "")
+        billing = billing_for_round(list(proxy_seeds or []))
         pm_country = billing["country"]
         device_id = new_device_id(access_token)
         available_seeds = [

@@ -190,6 +190,21 @@ Lưu ý: TLS fingerprint **đã** là Chrome thật (`curl_cffi` + `impersonate=
 `new_session`), nên hướng "đổi JA3" không cần làm nữa; đòn còn lại là telemetry id, uy tín
 account, và (đắt nhất) chạy payment element bằng browser thật.
 
+## Kiểm tra địa chỉ ngay lúc CHỌN PROXY (không đợi tới bước billing)
+
+Proxy không dựng được địa chỉ hoá đơn (IP exit không định vị được, ipwho bị rate-limit,
+PIN không tra được) thì bị **loại ngay ở tầng chọn proxy** như proxy chết —
+`engine._address_usable()` gọi `extract_cs.billing_address_ok()` (có cache 15 phút theo proxy).
+Tắt bằng `UPI_ADDRESS_PRECHECK=0`.
+
+Vì sao không để tới bước điền billing: lúc đó task đã chạy hết checkout, và retry nghĩa là
+chạy lại **cả flow** — đắt ngang dính risk decline. Kiểm ở tầng chọn proxy chỉ tốn ~1–3s
+(đã cache) và worker đổi ngay sang proxy khác.
+
+Nếu vẫn lọt tới bước billing (ví dụ geo chết đúng lúc đó), engine cho **thêm 1 lượt với proxy
+mới** kể cả khi `retries = 1` (`_is_address_error`), và trong flow `billing_for_round()` cũng
+thử các proxy khác của cùng round trước khi bỏ task.
+
 ## Địa chỉ hoá đơn: không dùng list cứng nữa
 
 Mặc định `UPI_BILLING_FALLBACK=0`: nếu không dựng được địa chỉ từ IP exit (mức 2 = PIN

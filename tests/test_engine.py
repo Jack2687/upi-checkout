@@ -419,7 +419,8 @@ class ProxyFilterFlagTests(unittest.TestCase):
                 "latency_ms": 900}
         proxy_url = "http://unique-filter-test@h:9"
         with patch("ippure.enabled", return_value=True), \
-             patch("ippure.check", return_value=good) as check:
+             patch("ippure.check", return_value=good) as check, \
+             patch("extract_cs.billing_address_ok", return_value=(True, "")):
             proxy, seed, verdict = engine._acquire_proxy(self.job(), self.task(),
                                                         [proxy_url])
         check.assert_called_once()
@@ -471,6 +472,59 @@ class RetryPolicyTests(unittest.TestCase):
         engine._finish(job, task, {"status": "FAIL", "err": "risk decline",
                                    "risk_decline": True}, time.time())
         self.assertEqual(task.no_retry_reason, "Stripe risk decline (account flagged)")
+
+
+class AddressPrecheckTests(unittest.TestCase):
+    """Proxy không dựng được địa chỉ hoá đơn thì loại NGAY lúc chọn proxy.
+
+    Nếu để tới bước điền billing mới phát hiện thì task đã chạy hết checkout, và retry là
+    phải chạy lại cả flow — đắt như dính risk decline. Kiểm ở đây chỉ tốn ~1-3s (có cache).
+    """
+
+    def setUp(self):
+        engine._ADDRESS_OK.clear()
+        self.enterContext(patch.object(engine, "_address_check_enabled", return_value=True))
+
+    def tearDown(self):
+        self.doCleanups()
+
+    def test_bad_proxy_is_rejected_and_logged(self):
+        job = engine.Job("j1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        events = []
+        job.emit = events.append
+        with patch("extract_cs.billing_address_ok", return_value=(False, "geo lookup failed")):
+            self.assertFalse(engine._address_usable(job, task, "http://bad@h:1"))
+        lines = [e.get("line", "") for e in events if e.get("type") == "log"]
+        self.assertTrue(any("không dựng được địa chỉ" in l for l in lines), lines)
+
+    def test_good_proxy_passes_and_is_cached(self):
+        job = engine.Job("j1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        job.emit = lambda ev: None
+        with patch("extract_cs.billing_address_ok", return_value=(True, "")) as check:
+            self.assertTrue(engine._address_usable(job, task, "http://good@h:2"))
+            self.assertTrue(engine._address_usable(job, task, "http://good@h:2"))
+        self.assertEqual(check.call_count, 1)          # lần 2 lấy từ cache
+
+    def test_check_can_be_disabled(self):
+        job = engine.Job("j1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        job.emit = lambda ev: None
+        with patch.object(engine, "_address_check_enabled", return_value=False), \
+             patch("extract_cs.billing_address_ok", return_value=(False, "x")) as check:
+            self.assertTrue(engine._address_usable(job, task, "http://bad@h:1"))
+        check.assert_not_called()
+
+
+class AddressRetryWithAnotherProxyTests(unittest.TestCase):
+    """Không dựng được địa chỉ = lỗi CHỌN PROXY -> đổi proxy chạy lại, không bỏ task."""
+
+    def test_error_detection(self):
+        self.assertTrue(engine._is_address_error(
+            "no billing address from the exit IP (geo lookup failed)"))
+        self.assertFalse(engine._is_address_error("Stripe risk decline"))
+        self.assertFalse(engine._is_address_error(None))
 
 
 class StepProgressTests(unittest.TestCase):

@@ -1307,6 +1307,36 @@ def _release_proxy(job_id: str, proxy: str) -> None:
             leases.pop(proxy, None)
 
 
+def _address_check_enabled() -> bool:
+    """Kiểm tra địa chỉ ngay lúc chọn proxy (mặc định BẬT, tắt bằng UPI_ADDRESS_PRECHECK=0)."""
+    raw = str(os.environ.get("UPI_ADDRESS_PRECHECK") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+_ADDRESS_OK: dict[str, tuple[float, bool, str]] = {}
+_ADDRESS_LOCK = threading.Lock()
+
+
+def _address_ok(proxy: str) -> tuple[bool, str]:
+    """(ok, lý do) — cache theo proxy để không tra lại geo cho cùng session."""
+    ttl = float(os.environ.get("UPI_ADDRESS_PRECHECK_TTL") or 900)
+    with _ADDRESS_LOCK:
+        hit = _ADDRESS_OK.get(proxy)
+    if hit and ttl > 0 and time.time() - hit[0] <= ttl:
+        return hit[1], hit[2]
+    try:
+        import extract_cs  # noqa: PLC0415 — import muộn: chỉ nạp khi thật sự kiểm tra
+        ok, why = extract_cs.billing_address_ok(proxy)
+    except Exception as exc:        # noqa: BLE001 — không kiểm tra được thì chạy như cũ
+        ok, why = True, f"check skipped ({type(exc).__name__})"
+    with _ADDRESS_LOCK:
+        if len(_ADDRESS_OK) > 4000:
+            for old in list(_ADDRESS_OK)[:1024]:
+                _ADDRESS_OK.pop(old, None)
+        _ADDRESS_OK[proxy] = (time.time(), ok, why)
+    return ok, why
+
+
 def _verdict_usable(verdict: dict, target_country: str) -> bool:
     if not verdict or not verdict.get("ok"):
         return False
@@ -1334,6 +1364,23 @@ def _task_seed_file(job: Job, task: Task, proxy: str, proxies: list[str], backup
     path = STATE_DIR / f"web_seed_{job.job_id}_{task.task_id}.txt"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _address_usable(job: Job, task: Task, proxy: str) -> bool:
+    """Proxy có dựng được ĐỊA CHỈ hoá đơn không (kiểm ngay lúc chọn proxy).
+
+    Vì sao ở đây: nếu để tới bước điền billing mới phát hiện thì task đã chạy hết checkout →
+    retry phải chạy lại cả flow (đắt như dính risk decline). Kiểm ở tầng chọn proxy thì chỉ
+    mất ~1-3s (có cache) và worker đổi ngay sang proxy khác.
+    """
+    if not _address_check_enabled():
+        return True
+    ok, why = _address_ok(proxy)
+    if ok:
+        return True
+    job.emit({"type": "log", "task_id": task.task_id, "line":
+              f"proxy bị loại: không dựng được địa chỉ hoá đơn ({why[:80]})"})
+    return False
 
 
 def _acquire_proxy(job: Job, task: Task,
@@ -1370,7 +1417,7 @@ def _acquire_proxy(job: Job, task: Task,
         cached = _cached_verdict(cand)
         if cached:
             # da cham roi (batch lon dung lai proxy) -> khoi do lai 2-4s
-            if _verdict_usable(cached, job.country):
+            if _verdict_usable(cached, job.country) and _address_usable(job, task, cand):
                 return cand, _task_seed_file(job, task, cand, proxies), cached
             _mark_proxy_bad(job.job_id, cand)
             _release_proxy(job.job_id, cand)
@@ -1384,7 +1431,11 @@ def _acquire_proxy(job: Job, task: Task,
                       f"{verdict.get('score')} điểm · {verdict.get('country')} · "
                       f"risk={verdict.get('risk')} · {verdict.get('user_type') or '?'} · "
                       f"{verdict.get('latency_ms')}ms"})
-            return cand, _task_seed_file(job, task, cand, proxies), verdict
+            if _address_usable(job, task, cand):
+                return cand, _task_seed_file(job, task, cand, proxies), verdict
+            _mark_proxy_bad(job.job_id, cand)
+            _release_proxy(job.job_id, cand)
+            continue
         _mark_proxy_bad(job.job_id, cand)
         _release_proxy(job.job_id, cand)
         job.emit({"type": "log", "task_id": task.task_id, "line":
@@ -1411,9 +1462,10 @@ def _acquire_proxy(job: Job, task: Task,
         except Exception:  # noqa: BLE001 — sinh lỗi thì vẫn chạy bằng pool cũ
             pass
 
-    # Khong con con nao "sach": van phai chay -> dung con ke tiep chua bi danh hong
+    # Hết con "sạch": vẫn phải chạy -> dùng con kế tiếp chưa bị đánh hỏng, và vẫn ghi seed
+    # RIÊNG cho task (backend chỉ nhận seed_file, không nhận chuỗi proxy).
     cand = _claim_candidate(job.job_id, proxies, task.task_id) or (proxies[0] if proxies else "")
-    return cand, fallback_seed, {}
+    return cand, _task_seed_file(job, task, cand, proxies), {}
 
 
 def _set_flow(job: Job, task: Task, flow: str, session: str = "", provider: str = "") -> None:
@@ -1690,11 +1742,18 @@ def _reset_task_for_retry(job: Job, task: Task) -> None:
               "email": task.email, "flow": None, "steps": deepcopy(task.steps), "run": task.run})
 
 
+def _is_address_error(error: str | None) -> bool:
+    """Task chết vì KHÔNG dựng được địa chỉ hoá đơn (thường do IP exit không định vị được)."""
+    low = str(error or "").lower()
+    return "no billing address" in low or "billing address" in low
+
+
 def _run_with_retries(job: Job, task: Task, proxy_file: Path,
                       proxies: list[str]) -> None:
     # `job.retries` = số lần chạy TỐI ĐA cho mỗi acc, không phải số lần thử lại.
     # Đặt 3 -> chạy lần 1, 2, 3 rồi dừng, KHÔNG bao giờ tới lần 4 (trước đây là
     # `range(retries + 1)` nên đặt 3 lại chạy 4 lần — gây nhầm khi đọc "Run 4").
+    address_retry_left = 1        # xem chú thích ở dưới (lỗi địa chỉ = lỗi CHỌN PROXY)
     for attempt in range(max(1, job.retries)):
         if job.stop_requested:
             if task.status == "pending":
@@ -1711,6 +1770,18 @@ def _run_with_retries(job: Job, task: Task, proxy_file: Path,
             _reset_task_for_retry(job, task)
         if _run_task(job, task, proxy_file, proxies):
             break
+        if address_retry_left and _is_address_error(task.error):
+            # Không dựng được địa chỉ hoá đơn = lỗi CHỌN PROXY (IP exit không định vị được),
+            # không phải lỗi của account — nên đổi proxy khác rồi chạy lại, chứ không bỏ task.
+            # Chạy lại rất rẻ (~15-20s, chết ngay ở đầu round) nên cho thêm 1 lượt kể cả khi
+            # người dùng đặt `retries = 1`.
+            address_retry_left -= 1
+            job.emit({"type": "log", "task_id": task.task_id, "line":
+                      "no billing address from this proxy — switching to another proxy "
+                      "and running once more"})
+            _reset_task_for_retry(job, task)
+            if _run_task(job, task, proxy_file, proxies):
+                break
 
 
 def _run_task_limited(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> None:
