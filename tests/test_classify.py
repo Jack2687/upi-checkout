@@ -34,6 +34,24 @@ class ClassifyCheckoutBlockTests(unittest.TestCase):
         self.assertEqual(status, "FAIL")
         self.assertIn("flow stopped at step 'approve'", err)
 
+    def test_transport_error_names_the_stage(self):
+        lines = ["[2026-10-15 15:54:18] [ERROR] all failed: promotion stage failed: "
+                 "Failed to perform, curl: (35) TLS connect error: error:00000000:invalid library"]
+        self.assertEqual(cli.transport_failure_stage(lines), "promotion")
+        status, err, _, _ = cli.classify_cs_outcome(lines, "approve", None, False)
+        self.assertEqual(status, "FAIL")
+        self.assertIn("proxy transport error", err)
+        self.assertIn("promotion", err)
+        self.assertNotIn("flow stopped at step", err)
+
+    def test_proxyerror_is_also_a_transport_error(self):
+        lines = ["[ERROR] all failed: provider failed: ProxyError: connection refused"]
+        self.assertEqual(cli.transport_failure_stage(lines), "provider")
+
+    def test_normal_failure_is_not_labelled_transport(self):
+        lines = ["[PM=IN] needs approve: UPI 0-value path", "[ERROR] all failed: no redirect_url"]
+        self.assertEqual(cli.transport_failure_stage(lines), "")
+
     def test_risk_decline_keeps_priority_over_checkout_message(self):
         lines = ["[PM=IN] needs approve", "setup_intent last_setup_error generic_decline",
                  "checkout created: cs_live_x"]

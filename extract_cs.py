@@ -1808,6 +1808,48 @@ def checkout_response_has_trial(payload: Any) -> bool:
     return False
 
 
+_TRANSPORT_ERROR_HINTS = (
+    "tls connect error", "curl: (35", "curl: (7)", "curl: (52", "curl: (56",
+    "failed to perform", "connection reset", "connection aborted", "connection refused",
+    "recv failure", "send failure", "ssl connect error", "sslerror", "proxyerror",
+    "connectionerror", "read timed out", "connect timeout", "timed out",
+)
+
+
+def is_transport_error(exc: BaseException | str) -> bool:
+    """Lỗi ở TẦNG VẬN CHUYỂN (TLS/kết nối/timeout) — không phải lỗi nghiệp vụ.
+
+    Đo thực tế: khi 200-300 worker cùng mở kết nối qua proxy thì ~12% handshake TLS bị
+    rơi (`curl: (35) TLS connect error`), nhưng chạy 20 kết nối song song thì 0%. Tức đây
+    là lỗi TẠM THỜI do quá tải phía proxy, không phải proxy chết hay account bị chặn —
+    nên thử lại sau ~1-2s gần như luôn qua.
+    """
+    text = str(exc or "").lower()
+    return any(h in text for h in _TRANSPORT_ERROR_HINTS)
+
+
+def with_transport_retry(fn: Any, *args: Any, label: str = "", **kwargs: Any) -> Any:
+    """Gọi `fn`, gặp lỗi vận chuyển thì thử lại (mặc định 3 lần, cách 1.5s).
+
+    Chỉ thử lại khi `is_transport_error` — lỗi nghiệp vụ (403 chặn checkout, decline,
+    promo không hợp lệ...) vẫn ném ra ngay để không đốt proxy/thời gian vô ích.
+    """
+    attempts = max(1, env_int("UPI_TRANSPORT_RETRY", 3, minimum=1))
+    delay = max(0.0, float(env_value("UPI_TRANSPORT_RETRY_DELAY", "1.5") or 1.5))
+    last: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — phân loại ngay bên dưới
+            last = exc
+            if attempt >= attempts or not is_transport_error(exc):
+                raise
+            log(f"{label or getattr(fn, '__name__', 'call')} lỗi vận chuyển "
+                f"({str(exc)[:70]}) — thử lại {attempt + 1}/{attempts} sau {delay:.1f}s", "[WARN] ")
+            time.sleep(delay)
+    raise last if last else RuntimeError("transport retry failed")
+
+
 def create_checkout(chatgpt: requests.Session, country: str) -> dict[str, str]:
     country = normalize_country(country)
     promo_mode = str(env_value("PP_PROMO_MODE", "campaign") or "").strip().lower() or "campaign"
@@ -1839,11 +1881,13 @@ def create_checkout(chatgpt: requests.Session, country: str) -> dict[str, str]:
         "x-openai-target-path": "/backend-api/payments/checkout",
         "x-openai-target-route": "/backend-api/payments/checkout",
     }
-    resp = chatgpt.post(
+    resp = with_transport_retry(
+        chatgpt.post,
         "https://chatgpt.com/backend-api/payments/checkout",
         json=body,
         headers=headers,
         timeout=CHATGPT_TIMEOUT,
+        label="create checkout",
     )
     dump_http(resp, "checkout", body, "POST", "https://chatgpt.com/backend-api/payments/checkout", force=resp.status_code >= 400)
     if resp.status_code >= 400:
@@ -3568,7 +3612,8 @@ def run_provider_flow(
             promotion_chatgpt = build_chatgpt_session(
                 access_token, device_id, current_promotion_proxy, session_token
             )
-            update_checkout_promotion(promotion_chatgpt, checkout, promotion_country)
+            with_transport_retry(update_checkout_promotion, promotion_chatgpt, checkout,
+                                 promotion_country, label="promotion stage")
         except Exception as exc:
             if is_checkout_not_active_error(exc):
                 raise

@@ -910,6 +910,27 @@ def is_risk_decline(lines: list[str]) -> bool:
     return False
 
 
+_TRANSPORT_STAGE_RE = re.compile(r"(checkout|promotion|provider|approve|pair)\s+(?:stage\s+)?failed", re.I)
+
+
+def transport_failure_stage(lines: list[str]) -> str:
+    """Chặng bị lỗi VẬN CHUYỂN (TLS/kết nối qua proxy). Rỗng nếu không phải lỗi này.
+
+    Đo thực tế: ~37% proxy trong pool chết hẳn (gọi lẻ cũng `ProxyError`), và khi 200-300
+    worker chạy song song thì thêm ~4% handshake TLS bị rơi (`curl: (35) TLS connect
+    error`). Cả hai đều bị ghi ra UI thành "no link — flow stopped at step 'approve'",
+    đọc tưởng lỗi ở Stripe/approve.
+    """
+    for line in lines:
+        low = line.lower()
+        if not any(h in low for h in ("tls connect error", "failed to perform",
+                                      "proxyerror", "connection reset", "ssl connect error")):
+            continue
+        hit = _TRANSPORT_STAGE_RE.search(line)
+        return hit.group(1).lower() if hit else "unknown"
+    return ""
+
+
 def is_checkout_blocked(lines: list[str]) -> bool:
     """OpenAI trả HTTP 403 ngay khi tạo checkout (chưa hề chạm Stripe)."""
     return any("checkout creation failed http 403" in l.lower() for l in lines)
@@ -955,6 +976,9 @@ def classify_cs_outcome(lines: list[str], stage: str, err: str | None,
         # đọc UI tưởng lỗi ở Stripe. Nêu đúng nguyên nhân để biết chặn ở đâu.
         if is_checkout_blocked(lines):
             err = "OpenAI blocked checkout creation (HTTP 403) — never reached Stripe"
+        elif transport_failure_stage(lines):
+            err = ("proxy transport error at '%s' stage (TLS/connection) — no link"
+                   % transport_failure_stage(lines))
         elif not lines:
             err = "extract_cs produced no output"
         else:

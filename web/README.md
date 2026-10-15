@@ -239,6 +239,27 @@ Fallback mức 1 cũng không còn mượn tên đường của thành phố kh�
 Kết quả mỗi task có thêm `billing_tier`: `tier2` (IP + PIN xác thực) · `tier1` (IP + reverse
 geocode) · `hardcoded-list`, hiện trong panel ở dòng **Address source**.
 
+## Lỗi vận chuyển proxy (`TLS connect error`) và cách chống
+
+Triệu chứng trên UI: `no link — flow stopped at step 'approve' | last log: … promotion stage
+failed: Failed to perform, curl: (35) TLS connect error …`. Đo trực tiếp trên pool hiện tại:
+
+| Phép đo | Kết quả |
+|---|---|
+| 30 proxy, gọi **lần lượt** (1 kết nối/lúc) | **11/30 chết hẳn** (37%) — `ProxyError` |
+| 19 proxy còn sống, 20 kết nối song song | 0% lỗi |
+| 19 proxy còn sống, 60 kết nối song song | 0% lỗi |
+| 19 proxy còn sống, **120 kết nối song song** | **4,2%** `TLS connect error` |
+
+Tức có HAI nguồn: (1) proxy chết hẳn trong pool — lọc bằng **Proxy quality filter** hoặc
+`region_pool.py --check`; (2) handshake rơi khi quá nhiều kết nối đồng thời.
+
+Cách chống trong code: `extract_cs.with_transport_retry()` bọc các chặng dễ rơi (tạo checkout,
+checkout/update của promotion) — gặp lỗi vận chuyển thì thử lại **3 lượt cách 1,5s**
+(`UPI_TRANSPORT_RETRY`, `UPI_TRANSPORT_RETRY_DELAY`), còn lỗi nghiệp vụ (403 chặn checkout,
+decline, promo không hợp lệ) thì **ném ra ngay**, không đốt proxy. Kết quả task cũng ghi rõ
+nguyên nhân: `proxy transport error at 'promotion' stage (TLS/connection) — no link`.
+
 ## Tiến độ bước (step) trong card task
 
 Tiến độ phải **đơn điệu**: bước nào đứng trước một bước đã xong thì chỉ có thể là
