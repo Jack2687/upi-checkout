@@ -239,6 +239,22 @@ Fallback mức 1 cũng không còn mượn tên đường của thành phố kh�
 Kết quả mỗi task có thêm `billing_tier`: `tier2` (IP + PIN xác thực) · `tier1` (IP + reverse
 geocode) · `hardcoded-list`, hiện trong panel ở dòng **Address source**.
 
+## Dọn log (`clean_logs.sh`)
+
+`logs/` phình ~1 GB mỗi tuần nếu để nguyên. Dùng:
+
+```bash
+./clean_logs.sh                    # xem trước, giữ 3 ngày (DRY-RUN, không xoá gì)
+./clean_logs.sh --days 7           # xem trước với mốc 7 ngày
+./clean_logs.sh --apply            # xoá thật
+```
+
+* **Không bao giờ** xoá `logs/web_*_results.json` trừ khi bạn tự đặt `--results-days N > 0`
+  — chúng là nguồn của bảng thống kê mã ₹0 và mọi phân tích lịch sử.
+* Giữ nguyên cache tra cứu trong `cs_state/` (`in_address_ledger.json`,
+  `in_pincode_store.json`, `in_state_seeds.json`).
+* Từ chối chạy khi đang có job (`--force` để bỏ qua) — xoá state của task đang chạy là hỏng task.
+
 ## Trộn pool proxy (Mix pool order)
 
 `_pick_proxy` chia proxy theo **thứ tự** trong pool (round-robin, để 100 task trên 100
