@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "web"))
@@ -76,3 +77,39 @@ class AddressVerifyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeoCacheTests(unittest.TestCase):
+    """Cache tra cứu mức 1 theo proxy: pool 500 session dùng lại -> không cache thì mỗi task
+    gọi lại ipwho.is và bị rate-limit ('Max retries exceeded') rồi mất địa chỉ."""
+
+    class Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def test_second_call_for_same_proxy_hits_the_cache(self):
+        calls = []
+
+        def fake_get(url, **kw):
+            calls.append(url)
+            return self.Resp({"success": True, "country_code": "IN", "city": "Patna",
+                              "region": "Bihar", "postal": "800001",
+                              "latitude": 25.6, "longitude": 85.1, "ip": "1.2.3.4"})
+
+        with patch.object(ex, "requests", SimpleNamespace(get=fake_get)), \
+             patch.object(ex, "geo_billing_via_module", return_value={}), \
+             patch.object(ex, "log", lambda *a, **k: None):
+            ex._GEO_TIER1_CACHE.clear()
+            first = ex.geo_billing_from_proxy("http://u:p@h:1")
+            before = len(calls)
+            second = ex.geo_billing_from_proxy("http://u:p@h:1")
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), before)          # lần 2 không gọi mạng
+
+    def test_failure_is_cached_only_briefly(self):
+        with patch.object(ex, "env_value", lambda n, d=None: d):
+            self.assertEqual(ex._geo_tier1_ttl(True), 21600.0)
+            self.assertEqual(ex._geo_tier1_ttl(False), 300.0)

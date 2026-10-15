@@ -530,6 +530,46 @@ def geo_billing_via_module(proxy: str) -> dict[str, Any]:
     }
 
 
+_GEO_TIER1_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_GEO_TIER1_LOCK = RLock()
+
+
+def _geo_tier1_ttl(ok: bool) -> float:
+    """TTL cho cache tra cứu mức 1. Lỗi thì cache NGẮN (5 phút) để không đóng băng task
+    khi ipwho/Nominatim chỉ đang bị rate-limit nhất thời."""
+    name, default = ("UPI_GEO_CACHE_TTL", "21600") if ok else ("UPI_GEO_CACHE_TTL_FAIL", "300")
+    return float(env_value(name, default) or default)
+
+
+def _geo_tier1_cached(key: str) -> dict[str, Any] | None:
+    """Tra cache theo PROXY (sticky session). Pool 500 session dùng lại cho hàng nghìn task,
+    nên không cache thì mỗi task gọi lại ipwho.is -> bị rate-limit ('Max retries exceeded')
+    rồi mất luôn địa chỉ."""
+    if not key:
+        return None
+    with _GEO_TIER1_LOCK:
+        hit = _GEO_TIER1_CACHE.get(key)
+    if not hit:
+        return None
+    expires_at, value = hit
+    if time.time() > expires_at:
+        with _GEO_TIER1_LOCK:
+            _GEO_TIER1_CACHE.pop(key, None)
+        return None
+    return dict(value)
+
+
+def _geo_tier1_store(key: str, value: dict[str, Any]) -> None:
+    if not key:
+        return
+    expires_at = time.time() + _geo_tier1_ttl(bool(value))
+    with _GEO_TIER1_LOCK:
+        if len(_GEO_TIER1_CACHE) > 4000:
+            for old in list(_GEO_TIER1_CACHE)[:1024]:
+                _GEO_TIER1_CACHE.pop(old, None)
+        _GEO_TIER1_CACHE[key] = (expires_at, dict(value))
+
+
 def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
     """Sinh billing theo IP exit thật. Trả `{}` nếu không dựng được (nơi gọi fallback).
 
@@ -541,6 +581,15 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
     """
     if not proxy:
         return {}
+
+    cache_key = f"t1:{proxy}"
+    cached = _geo_tier1_cached(cache_key)
+    if cached is not None:
+        if cached:
+            log("billing tier 1 (cached) %s / %s %s · exit %s"
+                % (cached.get("city"), cached.get("state"), cached.get("postal_code"),
+                   cached.get("_ip") or "?"))
+        return cached
 
     advanced = geo_billing_via_module(proxy)
     if advanced:
@@ -561,8 +610,10 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
     info = requests.get("https://ipwho.is/", headers=headers, proxies=proxies,
                         timeout=GEO_BILLING_TIMEOUT).json()
     if not isinstance(info, dict) or not info.get("success"):
+        _geo_tier1_store(cache_key, {})     # cache lỗi NGẮN: ipwho đang rate-limit
         return {}
     if str(info.get("country_code") or "").upper() != "IN":
+        _geo_tier1_store(cache_key, {})
         return {}                       # chỉ nhận exit Ấn Độ, y như geo_profile()
     city = str(info.get("city") or "").strip()
     state_name = str(info.get("region") or "").strip()
@@ -591,6 +642,7 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
         # Reverse geocode không trả city nhưng có PIN -> lấy quận/huyện thật của PIN.
         city = pin_district(postal)
     if not city or not postal:
+        _geo_tier1_store(cache_key, {})
         return {}                       # thiếu city/postal thì Stripe tax dễ toi -> fallback
     state_code = state_code_in(state_name, state_iso)
     if not state_code:
@@ -604,6 +656,7 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
     if not state_code:
         # Không map được mã bang -> KHÔNG gửi tên đầy đủ (dạng chưa từng chạy trong
         # luồng này). Thà rơi về list cứng còn hơn gửi state sai định dạng.
+        _geo_tier1_store(cache_key, {})
         return {}
     first = random.choice(FIRST_NAMES_IN)
     last = random.choice(LAST_NAMES_IN)
@@ -613,7 +666,7 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
     # tên bưu cục thật của chính PIN đó, còn không nữa thì chỉ ghi số nhà + thành phố.
     street = road or pin_area_name(postal)
     number = random.randint(1, 199)
-    return {
+    result = {
         "email": f"{first.lower()}{last.lower()}{random.randint(100, 9999)}@{domain}",
         "name": f"{first} {last}",
         "country": "IN",
@@ -624,6 +677,8 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
         "state": state_code,                   # mã ISO 2 ký tự, không phải tên bang
         "_ip": str(info.get("ip") or ""),      # để log truy được, không gửi lên Stripe
     }
+    _geo_tier1_store(cache_key, result)
+    return result
 
 
 _log_file = LOG_DIR / f"upi_{time.strftime('%Y%m%d-%H%M%S')}.log"
