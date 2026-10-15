@@ -27,12 +27,13 @@ class ClassifyCheckoutBlockTests(unittest.TestCase):
         self.assertNotIn("flow stopped at step", err)
         self.assertEqual((link, has_qr), ("", False))
 
-    def test_plain_approve_stall_still_reads_as_before(self):
+    def test_cause_from_flow_is_shown_instead_of_the_generic_label(self):
         lines = ["[2026-10-12 21:00:00] [PM=IN] needs approve: UPI 0-value path",
                  "[ERROR] all failed: no redirect_url generated"]
         status, err, _, _ = cli.classify_cs_outcome(lines, "approve", None, False)
         self.assertEqual(status, "FAIL")
-        self.assertIn("flow stopped at step 'approve'", err)
+        self.assertIn("no redirect_url generated", err)
+        self.assertNotIn("flow stopped at step", err)
 
     def test_transport_error_names_the_stage(self):
         lines = ["[2026-10-15 15:54:18] [ERROR] all failed: promotion stage failed: "
@@ -73,7 +74,7 @@ class ClassifyCheckoutBlockTests(unittest.TestCase):
         self.assertEqual(status, "FAIL")
         self.assertIn("promo_not_eligible", err)
         self.assertNotIn("flow stopped at step", err)
-        self.assertEqual(cli.last_failure_cause(lines)[:18], "promo_not_eligible: ")
+        self.assertTrue(cli.last_failure_cause(lines).startswith("promo_not_eligible: "))
 
     def test_generic_message_still_used_when_there_is_no_cause(self):
         lines = ["[PM=IN] needs approve: UPI 0-value path", "link extraction round 1/1 ended"]
