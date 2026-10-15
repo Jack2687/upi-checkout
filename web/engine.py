@@ -1027,6 +1027,20 @@ def _absorb_billing(task: Task, line: str) -> dict[str, str]:
 
 
 def _mk_hooks(job: Job, task: Task):
+    # Thu tu buoc chuan cua luong: dung de DON DIEU HOA tien do ben duoi.
+    # `steps_for()` tra ve list DICT, khong phai list tuple -> phai lay theo khoa "key"
+    # (bản đầu tôi viết `for k, _ in ...` nên dict bị unpack thành ("key","label") và
+    # bảng vị trí sai hết, khiến bước vẫn nằm "pending" giữa 2 ô đã xong).
+    position = {s["key"]: i for i, s in enumerate(cli.steps_for(job.mode))}
+
+    def emit_step(s: dict) -> None:
+        ev = {"type": "step", "task_id": task.task_id, "key": s["key"],
+              "status": s["status"]}
+        for k in ("detail", "err"):
+            if s.get(k):
+                ev[k] = str(s[k])[:200]
+        job.emit(ev)
+
     def step(key: str, status: str, **info: Any) -> None:
         s = task.step(key)
         if s is None:
@@ -1046,6 +1060,27 @@ def _mk_hooks(job: Job, task: Task):
             if info.get(k):
                 ev[k] = str(info[k])[:200]
         job.emit(ev)
+
+        # ĐƠN ĐIỆU HOÁ: bước nào đứng TRƯỚC bước vừa tới mà còn "pending" thì luồng này
+        # không dùng tới (ví dụ tax region không bật, PM tạo inline) -> đánh "skip".
+        # Không có bước này thì UI hiện ✓ ở giữa, phía trên vẫn còn ô trống -> nhìn như
+        # "hiện tùm lùm"/không theo kịp log (lỗi chỉ xảy ra ở chế độ in-process, vì luồng
+        # subprocess có `cli.make_step_advancer` riêng).
+        pos = position.get(key)
+        if pos is None or status not in ("done", "active", "skip", "fail"):
+            return
+        for other in task.steps:
+            if other is s:
+                continue
+            other_pos = position.get(other["key"])
+            # bỏ qua: bước của luồng khác (không có trong `position`), bước phía sau,
+            # bước đã có trạng thái, và BƯỚC ĐẦU (runner = cả luồng, không phải bị bỏ).
+            if other_pos is None or other_pos == 0 or other_pos >= pos:
+                continue
+            if other["status"] != "pending":
+                continue
+            other["status"] = "skip"
+            emit_step(other)
 
     def on_log(line: str) -> None:
         # Chỉ giữ lại đuôi ngắn cho banner lỗi (failReason) — KHÔNG còn đẩy từng dòng

@@ -473,6 +473,60 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertEqual(task.no_retry_reason, "Stripe risk decline (account flagged)")
 
 
+class StepProgressTests(unittest.TestCase):
+    """Tiến độ bước phải ĐƠN ĐIỆU: không còn ô "pending" nằm trước ô đã xong.
+
+    Lỗi cũ chỉ có ở chế độ in-process (desk): luồng subprocess có
+    `cli.make_step_advancer` riêng, còn in-process thì không -> UI hiện ✓ ở giữa mà phía
+    trên vẫn trống, nhìn như "step hiện tùm lùm, không theo kịp log".
+    """
+
+    def hooks(self):
+        job = engine.Job("job1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        task.steps = [{"key": st["key"], "label": st["label"], "status": "pending",
+                       "detail": "", "err": ""} for st in engine.cli.steps_for("cs")]
+        events = []
+        job.emit = events.append
+        step, _, _ = engine._mk_hooks(job, task)
+        return task, step, events
+
+    def test_no_pending_step_before_a_finished_one(self):
+        task, step, events = self.hooks()
+        step("runner", "active")
+        for line in ("Checkout promo: mode=campaign",
+                     "IN Bootstrap Stripe init ok, amount=INR 0.00",
+                     "Step 2: first attempt PM=IN...",
+                     "approve attempt 1/1 / proxy=proxy#x"):
+            hit = engine.cli.cs_stage_for_line(line)
+            self.assertIsNotNone(hit, line)
+            step(hit[0], "done" if hit[1] else "active")
+        keys = [s["key"] for s in task.steps]
+        done_at = max(i for i, s in enumerate(task.steps) if s["status"] == "done")
+        pending_before = [s["key"] for s in task.steps[:done_at] if s["status"] == "pending"]
+        self.assertEqual(pending_before, [], keys)
+        # và bước bỏ qua phải được phát event để UI cập nhật ngay
+        skipped = [e["key"] for e in events if e.get("status") == "skip"]
+        self.assertIn("tax", skipped)
+        self.assertIn("pm", skipped)
+        # runner (bước đầu) không bao giờ bị đánh skip
+        self.assertNotIn("runner", skipped)
+
+    def test_steps_stay_monotonic_across_a_retry(self):
+        task, step, _ = self.hooks()
+        step("runner", "active")
+        step("checkout", "done")
+        job = SimpleNamespace(mode="cs", emit=lambda ev: None)
+        engine._reset_task_for_retry(job, task)
+        self.assertTrue(all(s["status"] == "pending" for s in task.steps))
+        step("stripe_init", "done")
+        done_at = max(i for i, s in enumerate(task.steps) if s["status"] == "done")
+        # checkout (bước 2) bị bỏ qua ở vòng này -> 'skip', chỉ còn runner (bước đầu, không
+        # bao giờ tự đánh skip) là pending; nhưng nó KHÔNG nằm trước ô done nào khác.
+        self.assertEqual([s["key"] for s in task.steps[:done_at]
+                          if s["status"] == "pending"], ["runner"])
+
+
 class BillingTierTests(unittest.TestCase):
     """Đơn nào dùng địa chỉ list cứng thì phải thấy được trong kết quả."""
 

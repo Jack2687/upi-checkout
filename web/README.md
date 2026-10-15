@@ -239,6 +239,18 @@ Fallback mức 1 cũng không còn mượn tên đường của thành phố kh�
 Kết quả mỗi task có thêm `billing_tier`: `tier2` (IP + PIN xác thực) · `tier1` (IP + reverse
 geocode) · `hardcoded-list`, hiện trong panel ở dòng **Address source**.
 
+## Tiến độ bước (step) trong card task
+
+Tiến độ phải **đơn điệu**: bước nào đứng trước một bước đã xong thì chỉ có thể là
+`done`/`skip`, không bao giờ còn `pending`. Lỗi cũ (chỉ ở chế độ **in-process** mà desk
+đang dùng): luồng subprocess có `cli.make_step_advancer()` riêng để lấp các bước bị nhảy
+qua, còn in-process thì không — nên card hiện ✓ ở giữa mà phía trên vẫn là ô trống, nhìn
+như "step hiện tùm lùm, không theo kịp log".
+
+Giờ `web/engine.py::_mk_hooks.step()` tự đánh dấu `skip` cho mọi bước **phía trước** bước
+vừa tới mà còn `pending` (kèm event `step` để UI cập nhật ngay, không cần F5), và bỏ qua
+bước đầu `runner` (là cả luồng, không phải bị bỏ). Retry vẫn reset toàn bộ về `pending`.
+
 ## Dọn log (`clean_logs.sh`)
 
 `logs/` phình ~1 GB mỗi tuần nếu để nguyên. Dùng:
