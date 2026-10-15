@@ -62,6 +62,24 @@ class ClassifyCheckoutBlockTests(unittest.TestCase):
                   "[ERROR] all failed: promotion stage failed: Failed to perform, curl: (35)"]
         self.assertEqual(cli.transport_failure_stage(lines2), "promotion")
 
+    def test_real_cause_from_all_failed_line_is_used(self):
+        # In-process: flow không ném exception -> result.error rỗng -> trước đây bị dán nhãn
+        # chung "flow stopped at step 'approve'", che mất nguyên nhân thật.
+        lines = ["[WARN]   [PM=IN] provider failed: promo_not_eligible: 0-value promo did not apply",
+                 "[WARN] link extraction round 1/1 ended; no final URL",
+                 "[ERROR] all failed: promo_not_eligible: 0-value promo did not apply "
+                 "(minor amount=169407); account not eligible"]
+        status, err, _, _ = cli.classify_cs_outcome(lines, "approve", None, False)
+        self.assertEqual(status, "FAIL")
+        self.assertIn("promo_not_eligible", err)
+        self.assertNotIn("flow stopped at step", err)
+        self.assertEqual(cli.last_failure_cause(lines)[:18], "promo_not_eligible: ")
+
+    def test_generic_message_still_used_when_there_is_no_cause(self):
+        lines = ["[PM=IN] needs approve: UPI 0-value path", "link extraction round 1/1 ended"]
+        _, err, _, _ = cli.classify_cs_outcome(lines, "approve", None, False)
+        self.assertIn("flow stopped at step 'approve'", err)
+
     def test_risk_decline_keeps_priority_over_checkout_message(self):
         lines = ["[PM=IN] needs approve", "setup_intent last_setup_error generic_decline",
                  "checkout created: cs_live_x"]

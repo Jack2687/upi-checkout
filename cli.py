@@ -910,6 +910,24 @@ def is_risk_decline(lines: list[str]) -> bool:
     return False
 
 
+_ALL_FAILED_RE = re.compile(r"all failed:\s*(.+?)\s*$")
+
+
+def last_failure_cause(lines: list[str]) -> str:
+    """Lấy nguyên nhân thật từ dòng `[ERROR] all failed: <lý do>` của flow.
+
+    Vì sao cần: ở chế độ in-process, nếu flow KHÔNG ném exception (ví dụ promo_not_eligible
+    chỉ đặt stop_event rồi trả về rỗng) thì `result.error` rỗng, và bộ phân loại rơi vào câu
+    chung "no link — flow stopped at step 'approve'" — che mất nguyên nhân thật (đo trong job
+    380a86aad3a0: 450 task bị dán nhãn chung trong khi log đuôi ghi rõ promo_not_eligible).
+    """
+    for line in reversed(lines):
+        hit = _ALL_FAILED_RE.search(line)
+        if hit:
+            return hit.group(1).strip()[:200]
+    return ""
+
+
 _TRANSPORT_STAGE_RE = re.compile(r"(checkout|promotion|provider|approve|pair)\s+(?:stage\s+)?failed", re.I)
 
 
@@ -987,6 +1005,10 @@ def classify_cs_outcome(lines: list[str], stage: str, err: str | None,
         elif transport_failure_stage(lines):
             err = ("proxy transport error at '%s' stage (TLS/connection) — no link"
                    % transport_failure_stage(lines))
+        elif last_failure_cause(lines):
+            # Nêu lý do THẬT mà flow tự ghi (promo_not_eligible, session expired, ...) thay
+            # vì câu chung chung — nhờ đó UI và engine phân loại retry đúng.
+            err = last_failure_cause(lines)
         elif not lines:
             err = "extract_cs produced no output"
         else:
