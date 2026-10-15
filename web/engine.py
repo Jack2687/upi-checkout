@@ -1546,10 +1546,25 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
     task.raw_status = str(result.get("status") or "UNKNOWN")
     task.error = result.get("err") or result.get("error") or None
     # Lỗi cấp ACCOUNT (Stripe risk decline) -> đánh dấu để _run_with_retries không thử lại.
-    if result.get("risk_decline"):
+    if result.get("risk_decline") or "risk decline" in (task.error or "").lower():
         task.no_retry = True
         task.no_retry_reason = "Stripe risk decline (account flagged)"
         job.risk_decline_count += 1
+    elif "already paid" in (task.error or "").lower():
+        # Account đã trả tiền rồi: chạy lại chỉ tốn thêm 1 flow đầy đủ rồi cũng vậy.
+        task.no_retry = True
+        task.no_retry_reason = "user already paid — retry costs a full flow and cannot help"
+    elif _retry_stall_disabled() and "flow stopped at step 'approve'" in (task.error or ""):
+        # Nhóm lỗi chung 'stopped at approve': đo 3.965 task có retry trong log còn giữ ->
+        # 0 lần ra link, và 82,2% lần chạy lại lặp y hệt lỗi cũ (lỗi ở account/session,
+        # không phải lỗi tạm thời). Bật lại bằng UPI_RETRY_APPROVE_STALL=1 nếu muốn thử.
+        task.no_retry = True
+        task.no_retry_reason = ("flow stalled at approve (measured: 0/3965 retries produced "
+                                "a link, 82% repeat the same failure)")
+    elif "only a hosted checkout link" in (task.error or ""):
+        # Stripe chỉ trả link hosted, không mở được đường UPI ₹0 -> lỗi cấp account/session.
+        task.no_retry = True
+        task.no_retry_reason = "no ₹0 UPI path for this account (hosted link only)"
     elif "blocked checkout creation" in (task.error or ""):
         # Cloudflare chặn ngay bước tạo checkout: lần chạy lại gần như chắc chắn bị chặn
         # tiếp (đo thật 12 job gần nhất: 2.209 lần thử lại sau 403 -> 0 lần ra link),
@@ -1740,6 +1755,12 @@ def _reset_task_for_retry(job: Job, task: Task) -> None:
     task.updated_at = _now()
     job.emit({"type": "task_init", "task_id": task.task_id, "index": task.index,
               "email": task.email, "flow": None, "steps": deepcopy(task.steps), "run": task.run})
+
+
+def _retry_stall_disabled() -> bool:
+    """Có bỏ retry cho nhóm lỗi chung "flow stopped at step 'approve'" không (mặc định CÓ)."""
+    raw = str(os.environ.get("UPI_RETRY_APPROVE_STALL") or "0").strip().lower()
+    return raw not in ("1", "true", "yes", "on")
 
 
 def _is_address_error(error: str | None) -> bool:

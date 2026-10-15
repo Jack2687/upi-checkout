@@ -3,6 +3,7 @@
 Every checkout/proxy call is replaced; no tokens or payment requests leave here.
 """
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -462,9 +463,26 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertTrue(t.no_retry)
         self.assertIn("403", t.no_retry_reason)
 
-    def test_other_errors_still_retry(self):
-        t = self.finish("no link — flow stopped at step 'approve'")
+    def test_stall_at_approve_is_not_retried_by_default(self):
+        # Đo 3.965 task có retry trong log còn giữ: 0 lần ra link, 82,2% lặp y hệt lỗi cũ.
+        t = self.finish("no link — flow stopped at step 'approve' | last log: x")
+        self.assertTrue(t.no_retry)
+        self.assertIn("approve", t.no_retry_reason)
+
+    def test_stall_retry_can_be_switched_back_on(self):
+        with patch.dict(os.environ, {"UPI_RETRY_APPROVE_STALL": "1"}):
+            t = self.finish("no link — flow stopped at step 'approve' | last log: x")
         self.assertFalse(t.no_retry)
+
+    def test_already_paid_and_hosted_only_are_not_retried(self):
+        self.assertTrue(self.finish("User is already paid").no_retry)
+        t = self.finish("no QR link extracted — only a hosted checkout link (https://x)")
+        self.assertTrue(t.no_retry)
+
+    def test_transport_and_timeout_are_still_retried(self):
+        self.assertFalse(self.finish("proxy transport error at 'provider' stage").no_retry)
+        self.assertFalse(self.finish("timeout 240s").no_retry)
+        self.assertFalse(self.finish("no billing address from the exit IP").no_retry)
 
     def test_risk_decline_keeps_its_own_reason(self):
         job = engine.Job("job1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)

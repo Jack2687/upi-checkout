@@ -190,6 +190,28 @@ Lưu ý: TLS fingerprint **đã** là Chrome thật (`curl_cffi` + `impersonate=
 `new_session`), nên hướng "đổi JA3" không cần làm nữa; đòn còn lại là telemetry id, uy tín
 account, và (đắt nhất) chạy payment element bằng browser thật.
 
+## Chính sách retry theo loại lỗi (audit)
+
+Đo trên **3.965 task có ≥2 lượt chạy** trong log còn giữ: **0 lần retry nào ra được link**, và
+các nhóm lỗi lặp lại y hệt sau khi chạy lại:
+
+| Lỗi ở lượt trước | Số lần thử lại | Lượt sau OK | Lặp y hệt lỗi cũ |
+|---|---|---|---|
+| checkout 403 | 1.521 | 0 | 44,3% |
+| lỗi vận chuyển proxy | 1.030 | 0 | 11,2% |
+| timeout | 876 | 0 | 1,6% |
+| no link at approve (chung) | 343 | 0 | **82,2%** |
+| chỉ có hosted link (không phải QR) | 248 | 0 | 1,2% |
+| user already paid | 8 | 0 | 62,5% |
+
+Nên engine **bỏ retry** cho các nhóm chắc chắn là lỗi cấp account (đổi proxy cũng vô ích):
+`risk decline` (theo cả cờ lẫn nội dung lỗi) · `promo not eligible` · `checkout 403` ·
+`user already paid` · `chỉ có hosted link` · **`flow stopped at step 'approve'`** (bật lại bằng
+`UPI_RETRY_APPROVE_STALL=1`).
+
+Vẫn **giữ retry** cho lỗi tạm thời: lỗi vận chuyển proxy, timeout, không dựng được địa chỉ
+(nhóm này có lượt chạy lại rẻ hoặc do chọn nhầm proxy). Lưu ý `retries=1` = không có lượt nào.
+
 ## Kiểm tra địa chỉ ngay lúc CHỌN PROXY (không đợi tới bước billing)
 
 Proxy không dựng được địa chỉ hoá đơn (IP exit không định vị được, ipwho bị rate-limit,
