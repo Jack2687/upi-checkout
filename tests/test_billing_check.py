@@ -1,5 +1,6 @@
 """Địa chỉ/PIN hoá đơn: tách dòng đúng + kiểm tra PIN có thật và khớp vùng IP."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import engine  # noqa: E402
 import extract_cs as ex  # noqa: E402
+
+# Các test này gọi code có `log()` -> phải trỏ log sang file tạm, nếu không mỗi lần chạy
+# test lại đẻ ra một file logs/upi_<ts>.log rác trong repo.
+ex._log_file = Path(tempfile.mkdtemp(prefix="upi-test-")) / "flow.log"
 
 DB = {"800027": {"pin": "800027", "state": "Bihar", "district": "Patna", "areas": ["Patna GPO"]},
       "411001": {"pin": "411001", "state": "Maharashtra", "district": "Pune", "areas": ["Pune City"]},

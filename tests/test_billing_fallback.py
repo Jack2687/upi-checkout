@@ -1,11 +1,16 @@
 """List cứng địa chỉ hoá đơn: mặc định TẮT (task chết sớm thay vì gửi địa chỉ sai IP)."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extract_cs  # noqa: E402
+
+# Các test này gọi code có `log()` -> phải trỏ log sang file tạm, nếu không mỗi lần chạy
+# test lại đẻ ra một file logs/upi_<ts>.log rác trong repo.
+extract_cs._log_file = Path(tempfile.mkdtemp(prefix="upi-test-")) / "flow.log"
 
 
 def env_of(settings):

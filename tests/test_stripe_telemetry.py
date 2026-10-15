@@ -3,12 +3,16 @@
 Offline: không gọi mạng, `requests.post` bị thay bằng fixture.
 """
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extract_cs  # noqa: E402
+
+# `log()` ghi vào logs/upi_<ts>.log -> trỏ sang file tạm để test không đẻ log rác trong repo.
+extract_cs._log_file = Path(tempfile.mkdtemp(prefix="upi-test-")) / "flow.log"
 
 REAL_IDS = {"muid": "muid-from-stripe", "guid": "guid-from-stripe", "sid": "sid-from-stripe"}
 
