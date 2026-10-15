@@ -177,6 +177,40 @@ def _count_request_bytes(value: Any) -> int:
     return 0
 
 
+# Lỗi ở pha MỞ KẾT NỐI (bắt tay TLS / kết nối TCP) — request CHƯA tới server nên thử lại
+# là an toàn, kể cả với POST. Khác với timeout/read error (request có thể đã tới nơi).
+_CONNECT_ERROR_HINTS = (
+    "curl: (35", "curl: (7", "tls connect error", "ssl connect error",
+    "couldn't connect", "failed to connect", "connection refused",
+    "proxy connect", "cannot connect to proxy", "empty reply from server",
+)
+
+
+def _is_connect_error(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return any(h in text for h in _CONNECT_ERROR_HINTS)
+
+
+def _request_with_connect_retry(original: Any, session: Any, args: tuple, kwargs: dict) -> Any:
+    """Thử lại ngay ở tầng request khi KHÔNG mở được kết nối qua proxy.
+
+    Vì sao ở tầng này: đo thực tế khi 300 worker chạy song song, 4-37% lần mở kết nối bị rơi
+    handshake (`curl: (35) TLS connect error`) — rơi ở bất kỳ chặng nào (stripe init, PM,
+    confirm, poll...). Bọc ở đây phủ hết mọi chặng, thay vì phải bọc từng call site.
+    Mặc định 3 lượt (2 lần thử lại), đổi bằng UPI_CONNECT_RETRY / UPI_CONNECT_RETRY_DELAY.
+    Lỗi nghiệp vụ (HTTP 4xx/5xx) không đi qua đường này nên không bị thử lại.
+    """
+    attempts = max(1, env_int("UPI_CONNECT_RETRY", 3, minimum=1))
+    delay = max(0.0, float(env_value("UPI_CONNECT_RETRY_DELAY", "0.8") or 0.8))
+    for attempt in range(1, attempts + 1):
+        try:
+            return original(session, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if attempt >= attempts or not _is_connect_error(exc):
+                raise
+            time.sleep(delay)
+
+
 def _counting_request(original: Any) -> Any:
     """Bọc `Session.request` để đếm dung lượng, KHÔNG đổi hành vi request."""
 
@@ -185,7 +219,7 @@ def _counting_request(original: Any) -> Any:
         sent = (_count_request_bytes(kwargs.get("data"))
                 + _count_request_bytes(kwargs.get("json"))
                 + _count_request_bytes(kwargs.get("params")))
-        response = original(self, *args, **kwargs)
+        response = _request_with_connect_retry(original, self, args, kwargs)
         try:
             head = response.headers.get("Content-Length")
             received = int(head) if head and str(head).isdigit() else len(response.content or b"")
@@ -1842,8 +1876,14 @@ def with_transport_retry(fn: Any, *args: Any, label: str = "", **kwargs: Any) ->
             return fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 — phân loại ngay bên dưới
             last = exc
-            if attempt >= attempts or not is_transport_error(exc):
+            if not is_transport_error(exc):
                 raise
+            if attempt >= attempts:
+                # Nêu RÕ nhãn chặng trong lỗi cuối để nơi phân loại không phải đoán
+                # ("proxy transport error at 'unknown' stage" trước đây vì dòng lỗi
+                # cuối không có tên chặng).
+                raise RuntimeError(f"{label or getattr(fn, '__name__', 'call')} failed "
+                                   f"after {attempts} attempts: {exc}") from exc
             log(f"{label or getattr(fn, '__name__', 'call')} lỗi vận chuyển "
                 f"({str(exc)[:70]}) — thử lại {attempt + 1}/{attempts} sau {delay:.1f}s", "[WARN] ")
             time.sleep(delay)

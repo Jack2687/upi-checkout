@@ -101,7 +101,10 @@ def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
         "UPI_PROVIDER_COUNTRY": country,
         "UPI_PROMOTION_COUNTRY": country,
         "UPI_MAX_RETRY": "1",
-        "UPI_CHECKOUT_RETRY_MAX": "1",
+        # Chọn TỐI ĐA 3 proxy ứng viên cho chặng tạo checkout. Đo thực tế: 37% proxy
+        # trong pool chết hẳn (gọi lẻ cũng ProxyError), nên để 1 ứng viên thì trúng con
+        # chết là mất cả task kèm dòng lỗi "TLS connect error".
+        "UPI_CHECKOUT_RETRY_MAX": "3",
         "UPI_PROVIDER_RETRY_MAX": "1",
         "UPI_APPROVE_RETRY_MAX": "1",
         "UPI_MAX_APPROVE_BLOCKED": "1",

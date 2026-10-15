@@ -52,6 +52,16 @@ class ClassifyCheckoutBlockTests(unittest.TestCase):
         lines = ["[PM=IN] needs approve: UPI 0-value path", "[ERROR] all failed: no redirect_url"]
         self.assertEqual(cli.transport_failure_stage(lines), "")
 
+    def test_stage_is_named_even_when_the_last_line_has_no_stage(self):
+        # Lỗi cuối của flow thường chỉ là "all failed: Failed to perform, curl: (35) …"
+        # -> phải soi các dòng trước để biết chặng nào (trước đây trả 'unknown').
+        lines = ["[WARN] create checkout lỗi vận chuyển (Failed to perform, curl: (35) TLS connect error) — thử lại 2/3",
+                 "[ERROR] all failed: Failed to perform, curl: (35) TLS connect error: …"]
+        self.assertEqual(cli.transport_failure_stage(lines), "checkout")
+        lines2 = ["[WARN] promotion stage lỗi vận chuyển (…) — thử lại",
+                  "[ERROR] all failed: promotion stage failed: Failed to perform, curl: (35)"]
+        self.assertEqual(cli.transport_failure_stage(lines2), "promotion")
+
     def test_risk_decline_keeps_priority_over_checkout_message(self):
         lines = ["[PM=IN] needs approve", "setup_intent last_setup_error generic_decline",
                  "checkout created: cs_live_x"]

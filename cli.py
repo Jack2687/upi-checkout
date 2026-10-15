@@ -921,14 +921,22 @@ def transport_failure_stage(lines: list[str]) -> str:
     error`). Cả hai đều bị ghi ra UI thành "no link — flow stopped at step 'approve'",
     đọc tưởng lỗi ở Stripe/approve.
     """
+    fallback = ""
     for line in lines:
         low = line.lower()
         if not any(h in low for h in ("tls connect error", "failed to perform",
                                       "proxyerror", "connection reset", "ssl connect error")):
             continue
         hit = _TRANSPORT_STAGE_RE.search(line)
-        return hit.group(1).lower() if hit else "unknown"
-    return ""
+        if hit:
+            return hit.group(1).lower()
+        # Nhãn của `with_transport_retry` / các dòng log khác không ghi "X stage failed".
+        if "create checkout" in low or "checkout failed" in low:
+            return "checkout"
+        if "promotion" in low:
+            return "promotion"
+        fallback = fallback or "unknown"
+    return fallback
 
 
 def is_checkout_blocked(lines: list[str]) -> bool:
@@ -1021,7 +1029,7 @@ def cs_subprocess_one(token: str, proxy_path: Path, promo: str, state_dir: Path,
         "UPI_REQUIRE_ZERO": "0",
         "PP_PROMO_MODE": promo,
         "UPI_MAX_RETRY": "1",
-        "UPI_CHECKOUT_RETRY_MAX": "1",
+        "UPI_CHECKOUT_RETRY_MAX": "3",   # xem cs_backend: 37% proxy trong pool chết hẳn
         "UPI_PROVIDER_RETRY_MAX": "1",
         "UPI_APPROVE_RETRY_MAX": "1",
         "UPI_MAX_APPROVE_BLOCKED": "1",
