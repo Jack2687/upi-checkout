@@ -198,6 +198,7 @@ function newTask(taskId) {
     run: 1,
     egress: null,           // {ip, location, probed_at}
     netOut: 0, netIn: 0, netRequests: 0,   // dung luong proxy da dung (byte)
+    billingTier: '',        // tier2 | tier1 | hardcoded-list (nguon dia chi hoa don)
     billing: null,          // {billing_name, billing_city, billing_pin, geo_*}
     artifact: null,         // {upi_link, qr_png, qr_svg, amount_minor, intent}
     // Acc đã lên Plus chưa. Server chỉ bắt đầu dò khi khách DUYỆT MANDATE
@@ -445,6 +446,13 @@ function billingHtml(t) {
   const b = t.billing;
   if (!b) return '';
   const rows = [];
+  const tier = t.billingTier || b.billing_tier || '';
+  const TIER_LABEL = {
+    tier2: 'IP + verified PIN',
+    tier1: 'IP + reverse geocode',
+    'hardcoded-list': 'hardcoded list — does NOT match the exit IP',
+  };
+  if (tier) rows.push(['Address source', TIER_LABEL[tier] || tier]);
   if (b.billing_name) rows.push(['Billing name', b.billing_name]);
   const city = [b.billing_city, b.billing_pin].filter(Boolean).join(' ');
   if (city) rows.push(['Billing city', city]);
@@ -2082,6 +2090,7 @@ function onEgress(evt) {
 function onBilling(evt) {
   const t = ensureTask(evt.task_id);
   t.billing = Object.assign({}, t.billing || {}, evt.billing || {});
+  if (evt.billing && evt.billing.billing_tier) t.billingTier = evt.billing.billing_tier;
   queueTaskRender(t);
 }
 
@@ -2322,6 +2331,7 @@ function applySnapshot(data) {
     t.egress = td.egress || null;
     // Hoá đơn cũng phải đọc từ snapshot, nếu không F5 xong khối "Billing details" biến mất.
     t.billing = billingFromTask(td);
+    t.billingTier = td.billing_tier || '';
     t.netOut = td.net_out || 0;
     t.netIn = td.net_in || 0;
     t.netRequests = td.net_requests || 0;

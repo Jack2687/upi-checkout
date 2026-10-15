@@ -190,6 +190,22 @@ Lưu ý: TLS fingerprint **đã** là Chrome thật (`curl_cffi` + `impersonate=
 `new_session`), nên hướng "đổi JA3" không cần làm nữa; đòn còn lại là telemetry id, uy tín
 account, và (đắt nhất) chạy payment element bằng browser thật.
 
+## Địa chỉ hoá đơn: không dùng list cứng nữa
+
+Mặc định `UPI_BILLING_FALLBACK=0`: nếu không dựng được địa chỉ từ IP exit (mức 2 = PIN
+xác thực, mức 1 = ipwho + Nominatim) thì **task fail ngay ở đầu `run_once()`** — trước cả
+bước tạo checkout — chứ không gửi một địa chỉ thành phố metro + PIN cố định không khớp IP.
+Bật lại để so sánh bằng `UPI_BILLING_FALLBACK=1`.
+
+Lý do: đo trong log thấy fallback xảy ra ~2,1% số lần dựng profile (14.279/683.350), phần
+lớn vì proxy thoát ở nước khác (602 ca Philippines, 35 ca Myanmar) hoặc không định vị được
+bang (5.810 ca) — địa chỉ Ấn Độ cứng + IP nước ngoài là tín hiệu xấu với Stripe/OpenAI.
+Trong số đơn ra mã, nhóm dùng list cứng chiếm ~6,5% (bỏ ngày 10-04 là artifact của bản code
+chưa có geo-IP).
+
+Kết quả mỗi task có thêm `billing_tier`: `tier2` (IP + PIN xác thực) · `tier1` (IP + reverse
+geocode) · `hardcoded-list`, hiện trong panel ở dòng **Address source**.
+
 ## Trộn pool proxy (Mix pool order)
 
 `_pick_proxy` chia proxy theo **thứ tự** trong pool (round-robin, để 100 task trên 100

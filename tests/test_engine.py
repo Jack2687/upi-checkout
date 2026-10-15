@@ -351,7 +351,8 @@ class BillingCaptureTests(unittest.TestCase):
     def test_geo_line_fills_state_and_pin(self):
         t = self.task()
         written = engine._absorb_billing(t, "billing geo: Karnataka / PIN 575001 / exit 1.2.3.4")
-        self.assertEqual(written, {"geo_state": "Karnataka", "geo_pin": "575001"})
+        self.assertEqual(written, {"billing_tier": "tier1", "geo_state": "Karnataka",
+                                   "geo_pin": "575001"})
         self.assertEqual(engine._absorb_billing(t, "dòng log bình thường"), {})
 
     def test_retry_clears_billing_so_results_describe_the_last_run(self):
@@ -470,6 +471,34 @@ class RetryPolicyTests(unittest.TestCase):
         engine._finish(job, task, {"status": "FAIL", "err": "risk decline",
                                    "risk_decline": True}, time.time())
         self.assertEqual(task.no_retry_reason, "Stripe risk decline (account flagged)")
+
+
+class BillingTierTests(unittest.TestCase):
+    """Đơn nào dùng địa chỉ list cứng thì phải thấy được trong kết quả."""
+
+    def task(self):
+        return engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+
+    def test_tier_is_recorded_once_per_attempt(self):
+        t = self.task()
+        engine._absorb_billing(t, "billing geo: Karnataka / PIN 575001 / exit 1.2.3.4 (IN)")
+        self.assertEqual(t.billing_tier, "tier1")
+        # dòng sau (vd tier 2 của lần chạy khác) không ghi đè trong cùng lần chạy
+        engine._absorb_billing(t, "billing tier 2 (PIN verified) 1.2.3.4 / Patna / BR 800027")
+        self.assertEqual(t.billing_tier, "tier1")
+
+    def test_hardcoded_list_tier(self):
+        t = self.task()
+        engine._absorb_billing(t, "billing using the hardcoded list (Mumbai) — neither tier 2 nor tier 1")
+        self.assertEqual(t.billing_tier, "hardcoded-list")
+        self.assertEqual(t.to_dict()["billing_tier"], "hardcoded-list")
+
+    def test_retry_clears_tier(self):
+        t = self.task()
+        engine._absorb_billing(t, "billing tier 2 (PIN verified) 1.2.3.4 / Patna / BR 800027")
+        job = SimpleNamespace(mode="cs", emit=lambda ev: None)
+        engine._reset_task_for_retry(job, t)
+        self.assertEqual(t.billing_tier, "")
 
 
 class NetUsageTests(unittest.TestCase):

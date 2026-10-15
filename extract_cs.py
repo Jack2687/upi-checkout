@@ -96,6 +96,14 @@ class FlowCancelled(BaseException):
     """Cancellation must escape protocol retry handlers catching Exception."""
 
 
+class BillingAddressUnavailable(RuntimeError):
+    """Không dựng được địa chỉ hoá đơn theo IP exit, và list cứng đang TẮT.
+
+    Ném ngay ở đầu `run_once()` (trước cả bước tạo checkout) để task chết sớm, không
+    đốt cả flow rồi mới gửi một địa chỉ không khớp IP.
+    """
+
+
 class FlowTimedOut(BaseException):
     """Task deadline elapsed; do not retry the interrupted HTTP operation."""
 
@@ -2115,6 +2123,13 @@ def upi_billing_profile(proxy: str = "") -> dict[str, str]:
         # ("mức 2 (PIN xác thực)" / "mức 1 (ipwho+Nominatim)"). Log thêm một dòng
         # chung ở đây từng ghi sai tên mức — kết quả mức 2 nhưng vẫn đề "mức 1".
     if not profile:
+        # Mặc định KHÔNG dùng list cứng: địa chỉ cứng (thành phố metro + PIN cố định)
+        # không khớp IP exit là tín hiệu xấu với Stripe/OpenAI, mà task kiểu này lại
+        # tốn cả flow. Bật lại bằng UPI_BILLING_FALLBACK=1 khi cần so sánh.
+        if not env_bool("UPI_BILLING_FALLBACK", False):
+            raise BillingAddressUnavailable(
+                "no billing address from the exit IP (geo lookup failed) and the hardcoded "
+                "list is disabled — set UPI_BILLING_FALLBACK=1 to allow it")
         profile = generate_dynamic_in_billing()
         log("billing using the hardcoded list (%s) — neither tier 2 nor tier 1 could build an address"
             % profile["city"], "[WARN] ")

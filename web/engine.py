@@ -140,6 +140,7 @@ class Task:
     geo_state: str = ""
     geo_city: str = ""
     geo_pin: str = ""
+    billing_tier: str = ""           # tier2 (PIN xác thực) | tier1 (IP+Nominatim) | hardcoded-list
     billing_name: str = ""           # tên trên hoá đơn (để đo trùng lặp tên)
     billing_city: str = ""
     billing_pin: str = ""
@@ -209,6 +210,7 @@ class Task:
             "net_out": self.net_out,
             "net_in": self.net_in,
             "net_requests": self.net_requests,
+            "billing_tier": self.billing_tier,
             "billing_name": self.billing_name,
             "billing_city": self.billing_city,
             "billing_pin": self.billing_pin,
@@ -975,6 +977,15 @@ _BILLING_PATTERNS: tuple[tuple["re.Pattern[str]", tuple[str, ...]], ...] = (
 )
 
 
+# Nguồn địa chỉ hoá đơn, đọc từ log để biết đơn nào dùng list cứng (địa chỉ không
+# khớp IP) — trước đây phải suy từ thành phố/PIN nên dễ đoán sai.
+_BILLING_TIER_PATTERNS: tuple[tuple["re.Pattern[str]", str], ...] = (
+    (re.compile(r"billing tier 2 \(PIN verified\)"), "tier2"),
+    (re.compile(r"billing geo:\s*[^/]+?\s*/\s*PIN\s*\d{6}"), "tier1"),
+    (re.compile(r"billing using the hardcoded list"), "hardcoded-list"),
+)
+
+
 def _absorb_billing(task: Task, line: str) -> dict[str, str]:
     """Bắt thông tin hoá đơn trong 1 dòng log, ghi vào task (mỗi khoá lấy lần đầu).
 
@@ -982,6 +993,12 @@ def _absorb_billing(task: Task, line: str) -> dict[str, str]:
     bắn event `task_billing` để panel hiện khối "Billing details" ngay, không phải F5.
     """
     written: dict[str, str] = {}
+    if not task.billing_tier:
+        for pattern, tier in _BILLING_TIER_PATTERNS:
+            if pattern.search(line):
+                task.billing_tier = tier
+                written["billing_tier"] = tier
+                break
     for pattern, keys in _BILLING_PATTERNS:
         hit = pattern.search(line)
         if not hit:
@@ -1618,6 +1635,7 @@ def _reset_task_for_retry(job: Job, task: Task) -> None:
     # Xoá hoá đơn của lần chạy trước: dữ liệu lưu lại phải là của LẦN CHẠY CUỐI,
     # nếu không thì task retry xong vẫn mang vùng/PIN của lần 1 (đọc sai vùng nào ra mã).
     task.geo_state = task.geo_city = task.geo_pin = ""
+    task.billing_tier = ""
     task.billing_name = task.billing_city = task.billing_pin = ""
     task.status = "pending"
     task.updated_at = _now()
