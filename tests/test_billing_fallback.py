@@ -14,9 +14,12 @@ def env_of(settings):
 
 class BillingFallbackTests(unittest.TestCase):
     def profile(self, settings, geo):
+        # `verify_billing_address` tra India Post + probe exit (mạng thật) -> thay bằng
+        # bản giả: test này chỉ kiểm tra công tắc fallback.
         with patch.object(extract_cs, "env_value", env_of(settings)), \
              patch.object(extract_cs, "env_bool",
                           lambda n, d=False: bool(settings.get(n, d))), \
+             patch.object(extract_cs, "verify_billing_address", return_value="ok"), \
              patch.object(extract_cs, "geo_billing_from_proxy", return_value=geo):
             return extract_cs.upi_billing_profile("http://p@h:1")
 

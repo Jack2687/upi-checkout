@@ -141,6 +141,7 @@ class Task:
     geo_city: str = ""
     geo_pin: str = ""
     billing_tier: str = ""           # tier2 (PIN xác thực) | tier1 (IP+Nominatim) | hardcoded-list
+    billing_check: str = ""           # ok | fixed | mismatch-exit | bad-pin | unknown
     billing_name: str = ""           # tên trên hoá đơn (để đo trùng lặp tên)
     billing_city: str = ""
     billing_pin: str = ""
@@ -211,6 +212,7 @@ class Task:
             "net_in": self.net_in,
             "net_requests": self.net_requests,
             "billing_tier": self.billing_tier,
+            "billing_check": self.billing_check,
             "billing_name": self.billing_name,
             "billing_city": self.billing_city,
             "billing_pin": self.billing_pin,
@@ -972,13 +974,18 @@ _BILLING_PATTERNS: tuple[tuple["re.Pattern[str]", tuple[str, ...]], ...] = (
     (re.compile(r"billing (?:mức 2|tier 2) \([^)]*\)\s*\S+\s*/\s*([^/]+?)\s*/\s*[A-Z]{2}\s*(\d{6})"),
      ("geo_city", "geo_pin")),
     # IN details filled into PM billing_details: Vivaan Joshi / 67 Janpath / New Delhi 110001
-    (re.compile(r"details filled into PM billing_details:\s*(.+?)\s*/\s*(.+?)\s*/\s*(.+?)\s+(\d{6})\s*$"),
+    # Địa chỉ có thể CHỨA " / " (vd "90, Golden Residency, Pipola / Tehri Garhwal") nên
+    # nhóm địa chỉ phải THAM LAM (`.*`) — bản cũ dùng `.+?` nên 12,8% bản ghi bị tách sai:
+    # thành phố bị dính cả địa chỉ, PIN/city lệch nhau.
+    (re.compile(r"details filled into PM billing_details:\s*(?P<name>[^/]+?)\s*/\s*"
+                r"(?P<addr>.*)\s*/\s*(?P<city>[^/]+?)\s+(?P<pin>\d{6})\s*$"),
      ("billing_name", "_addr", "billing_city", "billing_pin")),
 )
 
 
 # Nguồn địa chỉ hoá đơn, đọc từ log để biết đơn nào dùng list cứng (địa chỉ không
 # khớp IP) — trước đây phải suy từ thành phố/PIN nên dễ đoán sai.
+_BILLING_CHECK_RE = re.compile(r"billing check:\s*([a-z-]+)")
 _BILLING_TIER_PATTERNS: tuple[tuple["re.Pattern[str]", str], ...] = (
     (re.compile(r"billing tier 2 \(PIN verified\)"), "tier2"),
     (re.compile(r"billing geo:\s*[^/]+?\s*/\s*PIN\s*\d{6}"), "tier1"),
@@ -993,6 +1000,10 @@ def _absorb_billing(task: Task, line: str) -> dict[str, str]:
     bắn event `task_billing` để panel hiện khối "Billing details" ngay, không phải F5.
     """
     written: dict[str, str] = {}
+    hit = _BILLING_CHECK_RE.search(line)
+    if hit and not task.billing_check:
+        task.billing_check = hit.group(1)
+        written["billing_check"] = task.billing_check
     if not task.billing_tier:
         for pattern, tier in _BILLING_TIER_PATTERNS:
             if pattern.search(line):
@@ -1636,6 +1647,7 @@ def _reset_task_for_retry(job: Job, task: Task) -> None:
     # nếu không thì task retry xong vẫn mang vùng/PIN của lần 1 (đọc sai vùng nào ra mã).
     task.geo_state = task.geo_city = task.geo_pin = ""
     task.billing_tier = ""
+    task.billing_check = ""
     task.billing_name = task.billing_city = task.billing_pin = ""
     task.status = "pending"
     task.updated_at = _now()

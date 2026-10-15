@@ -199,6 +199,7 @@ function newTask(taskId) {
     egress: null,           // {ip, location, probed_at}
     netOut: 0, netIn: 0, netRequests: 0,   // dung luong proxy da dung (byte)
     billingTier: '',        // tier2 | tier1 | hardcoded-list (nguon dia chi hoa don)
+    billingCheck: '',       // ok | fixed | fixed-pin | bad-pin | mismatch-exit
     billing: null,          // {billing_name, billing_city, billing_pin, geo_*}
     artifact: null,         // {upi_link, qr_png, qr_svg, amount_minor, intent}
     // Acc đã lên Plus chưa. Server chỉ bắt đầu dò khi khách DUYỆT MANDATE
@@ -453,6 +454,16 @@ function billingHtml(t) {
     'hardcoded-list': 'hardcoded list — does NOT match the exit IP',
   };
   if (tier) rows.push(['Address source', TIER_LABEL[tier] || tier]);
+  const check = t.billingCheck || b.billing_check || '';
+  const CHECK_LABEL = {
+    ok: 'OK — PIN matches city/state and the exit region',
+    fixed: 'fixed — city/state corrected from the PIN',
+    'fixed-pin': 'fixed — invalid PIN replaced with a verified one',
+    'bad-pin': 'PIN not found in India Post',
+    'mismatch-exit': 'PIN state ≠ proxy exit state',
+    unknown: 'not checked',
+  };
+  if (check) rows.push(['Address check', CHECK_LABEL[check] || check]);
   if (b.billing_name) rows.push(['Billing name', b.billing_name]);
   const city = [b.billing_city, b.billing_pin].filter(Boolean).join(' ');
   if (city) rows.push(['Billing city', city]);
@@ -2091,6 +2102,7 @@ function onBilling(evt) {
   const t = ensureTask(evt.task_id);
   t.billing = Object.assign({}, t.billing || {}, evt.billing || {});
   if (evt.billing && evt.billing.billing_tier) t.billingTier = evt.billing.billing_tier;
+  if (evt.billing && evt.billing.billing_check) t.billingCheck = evt.billing.billing_check;
   queueTaskRender(t);
 }
 
@@ -2332,6 +2344,7 @@ function applySnapshot(data) {
     // Hoá đơn cũng phải đọc từ snapshot, nếu không F5 xong khối "Billing details" biến mất.
     t.billing = billingFromTask(td);
     t.billingTier = td.billing_tier || '';
+    t.billingCheck = td.billing_check || '';
     t.netOut = td.net_out || 0;
     t.netIn = td.net_in || 0;
     t.netRequests = td.net_requests || 0;

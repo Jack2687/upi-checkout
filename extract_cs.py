@@ -563,13 +563,16 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
     first = random.choice(FIRST_NAMES_IN)
     last = random.choice(LAST_NAMES_IN)
     domain = random.choice(EMAIL_DOMAINS)
-    street = road or random.choice(random.choice(CITIES_IN)["streets"])
+    # KHÔNG mượn tên đường của thành phố khác trong list cứng: nó tạo địa chỉ vô lý kiểu
+    # "72 Banjara Hills Rd 1 / Indore 452001". Không có road (Nominatim trả rỗng) thì lấy
+    # tên bưu cục thật của chính PIN đó, còn không nữa thì chỉ ghi số nhà + thành phố.
+    street = road or pin_area_name(postal)
     number = random.randint(1, 199)
     return {
         "email": f"{first.lower()}{last.lower()}{random.randint(100, 9999)}@{domain}",
         "name": f"{first} {last}",
         "country": "IN",
-        "line1": f"{number} {street}",
+        "line1": f"{number} {street}".strip() if street else f"{number}, {city}",
         "line2": "",
         "city": city,
         "postal_code": postal,
@@ -2106,6 +2109,103 @@ def stripe_elements_session_params(ctx: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def pin_area_name(pin: str) -> str:
+    """Tên bưu cục/khu vực THẬT của PIN (India Post). Rỗng nếu không tra được."""
+    if not pin:
+        return ""
+    try:
+        os.environ.setdefault("UPI_STATE_DIR", str(SCRIPT_DIR / "cs_state"))
+        import geobilling  # noqa: PLC0415
+        record = geobilling._pin_record(str(pin), timeout=GEO_BILLING_TIMEOUT) or {}
+        areas = [str(a).strip() for a in (record.get("areas") or []) if str(a).strip()]
+        return random.choice(areas[:8]) if areas else ""
+    except Exception:  # noqa: BLE001 — tra được thì tốt, không thì thôi
+        return ""
+
+
+def verify_billing_address(billing: dict[str, Any], proxy: str = "") -> str:
+    """Kiểm tra địa chỉ hoá đơn có "chuẩn" không, tự sửa phần sửa được. Trả verdict.
+
+    Chuẩn = PIN tồn tại THẬT theo India Post, city/state của hoá đơn KHỚP PIN đó, và
+    PIN cùng bang với IP exit. Verdict:
+      ok            — mọi thứ khớp
+      fixed         — city/state bị lệch PIN, đã sửa theo India Post
+      mismatch-exit — PIN thuộc bang khác với bang của IP exit (không sửa được vì phải
+                      giữ địa chỉ khớp IP; đây là dấu hiệu proxy/geo có vấn đề)
+      bad-pin       — không tra được PIN (India Post lỗi hoặc PIN không tồn tại)
+      unknown       — không có PIN để kiểm tra
+    """
+    pin = str(billing.get("postal_code") or "").strip()
+    verdict, exit_state, pin_state = "unknown", "", ""
+    if pin:
+        record: dict[str, Any] = {}
+        try:
+            os.environ.setdefault("UPI_STATE_DIR", str(SCRIPT_DIR / "cs_state"))
+            import geobilling  # noqa: PLC0415
+            record = geobilling._pin_record(pin, timeout=GEO_BILLING_TIMEOUT) or {}
+        except Exception as exc:  # noqa: BLE001
+            log(f"billing check: PIN lookup lỗi ({str(exc)[:60]})", "[WARN] ")
+        if record:
+            pin_state = str(record.get("state") or "")
+            pin_district = str(record.get("district") or "")
+            code = state_code_in(pin_state, "")
+            fixed: list[str] = []
+            if code and billing.get("state") != code:
+                fixed.append(f"state {billing.get('state')}→{code}")
+                billing["state"] = code
+            if pin_district and billing.get("city") and \
+                    billing["city"].strip().lower() != pin_district.strip().lower():
+                fixed.append(f"city {billing['city']}→{pin_district}")
+                billing["city"] = pin_district
+            verdict = "fixed" if fixed else "ok"
+            if proxy:
+                try:
+                    import geobilling  # noqa: PLC0415
+                    info = geobilling.probe_exit(proxy_url_for_requests(proxy),
+                                                 timeout=GEO_BILLING_TIMEOUT) or {}
+                    exit_state = state_code_in(str(info.get("region") or ""),
+                                               str(info.get("region_code") or ""))
+                except Exception:  # noqa: BLE001
+                    exit_state = ""
+            if exit_state and code and exit_state != code:
+                verdict = "mismatch-exit"
+        else:
+            # PIN không tồn tại thật (hay gặp ở mức 1: PIN lấy từ ipwho/Nominatim mà không
+            # xác thực). Vá bằng một PIN ĐÃ XÁC THỰC của cùng bang + đổi city theo PIN đó,
+            # thay vì gửi lên Stripe một PIN không có thật.
+            verdict = "bad-pin"
+            fixed_pin: dict[str, Any] = {}
+            try:
+                os.environ.setdefault("UPI_STATE_DIR", str(SCRIPT_DIR / "cs_state"))
+                import geobilling  # noqa: PLC0415
+                for cand in geobilling._seed_pins(str(billing.get("state") or ""),
+                                                   timeout=GEO_BILLING_TIMEOUT):
+                    rec = geobilling._pin_record(str(cand), timeout=GEO_BILLING_TIMEOUT) or {}
+                    if rec.get("state"):
+                        fixed_pin = rec
+                        break
+            except Exception:  # noqa: BLE001
+                fixed_pin = {}
+            if fixed_pin:
+                billing["postal_code"] = str(fixed_pin.get("pin") or "")
+                pin_state = str(fixed_pin.get("state") or "")
+                code = state_code_in(pin_state, "")
+                if code:
+                    billing["state"] = code
+                if fixed_pin.get("district"):
+                    billing["city"] = str(fixed_pin["district"])
+                areas = [str(a) for a in (fixed_pin.get("areas") or []) if str(a).strip()]
+                if areas:
+                    billing["line1"] = "%s %s" % (
+                        str(billing.get("line1") or "").split(" ")[0] or random.randint(1, 199),
+                        random.choice(areas[:8]))
+                verdict = "fixed-pin"
+    log("billing check: %s | PIN %s -> %s / %s | exit %s"
+        % (verdict, pin or "?", (pin_state or billing.get("state") or "?"),
+           billing.get("city") or "?", exit_state or "?"))
+    return verdict
+
+
 def upi_billing_profile(proxy: str = "") -> dict[str, str]:
     """Profile billing: ưu tiên suy từ IP exit, không thì mới dùng list cứng.
 
@@ -2157,6 +2257,9 @@ def upi_billing_profile(proxy: str = "") -> dict[str, str]:
     # 传给 Stripe，从随机 phone 推出来的那个会让整条流程拿不到链接。
     profile["vpa_explicit"] = "1" if str(profile.get("vpa") or "").strip() else ""
     profile["vpa"] = normalize_vpa(profile.get("vpa", ""), profile.get("phone", ""))
+    # Kiểm tra địa chỉ lần cuối (PIN có thật không, city/state có khớp PIN không, PIN có
+    # cùng bang với IP exit không) rồi mới gửi lên Stripe.
+    profile["_check"] = verify_billing_address(profile, proxy)
     return profile
 
 

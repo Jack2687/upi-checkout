@@ -203,6 +203,23 @@ bang (5.810 ca) — địa chỉ Ấn Độ cứng + IP nước ngoài là tín 
 Trong số đơn ra mã, nhóm dùng list cứng chiếm ~6,5% (bỏ ngày 10-04 là artifact của bản code
 chưa có geo-IP).
 
+### Kiểm tra địa chỉ trước khi gửi (`billing check`)
+
+`extract_cs.verify_billing_address()` chạy ngay trong `upi_billing_profile()` (đầu mỗi round)
+và trả về một verdict, ghi vào `billing_check` của task + hiện ở panel dòng **Address check**:
+
+| verdict | Nghĩa | Có sửa gì không |
+|---|---|---|
+| `ok` | PIN có thật, city/state khớp PIN, cùng bang với IP exit | không |
+| `fixed` | city/state lệch PIN | **sửa** city/state theo India Post |
+| `fixed-pin` | PIN không tồn tại thật (hay gặp ở mức 1) | **thay** bằng PIN đã xác thực cùng bang + đổi city/locality theo PIN đó |
+| `mismatch-exit` | PIN thuộc bang khác IP exit | không (phải giữ địa chỉ khớp IP — đây là cảnh báo proxy/geo) |
+| `bad-pin` | không tra được PIN (và không vá được `_seed_pins`) | không |
+| `unknown` | không có PIN | không |
+
+Fallback mức 1 cũng không còn mượn tên đường của thành phố khác: khi Nominatim không trả
+`road` thì lấy tên bưu cục thật của chính PIN đó, không thì chỉ `"<số nhà>, <thành phố>"`.
+
 Kết quả mỗi task có thêm `billing_tier`: `tier2` (IP + PIN xác thực) · `tier1` (IP + reverse
 geocode) · `hardcoded-list`, hiện trong panel ở dòng **Address source**.
 
