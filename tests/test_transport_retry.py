@@ -102,7 +102,8 @@ class TransportRetryTests(unittest.TestCase):
                 raise RuntimeError(TLS)
             return "ok"
 
-        with patch.object(ex, "env_value", lambda n, d=None: d), \
+        with patch.object(ex, "env_value",
+                          lambda n, d=None: "3" if n == "UPI_TRANSPORT_RETRY" else d), \
              patch("time.sleep", lambda *_: None):
             self.assertEqual(ex.with_transport_retry(flaky, label="t"), "ok")
         self.assertEqual(len(calls), 3)
@@ -114,11 +115,26 @@ class TransportRetryTests(unittest.TestCase):
             calls.append(1)
             raise RuntimeError(TLS)
 
-        with patch.object(ex, "env_value", lambda n, d=None: d), \
+        with patch.object(ex, "env_value",
+                          lambda n, d=None: "3" if n == "UPI_TRANSPORT_RETRY" else d), \
              patch("time.sleep", lambda *_: None), \
              self.assertRaises(RuntimeError):
             ex.with_transport_retry(always, label="t")
-        self.assertEqual(len(calls), 3)          # mặc định 3 lượt
+        self.assertEqual(len(calls), 3)
+
+    def test_default_is_two_attempts(self):
+        # Tầng request đã thử lại 3 lượt khi lỗi mở kết nối -> ở đây chỉ 2 lượt để tránh
+        # nhân lên thành 3x3 = 9 lần cho cùng một request.
+        calls = []
+
+        def always():
+            calls.append(1)
+            raise RuntimeError(TLS)
+
+        with patch.object(ex, "env_value", lambda n, d=None: d), \
+             patch("time.sleep", lambda *_: None), self.assertRaises(RuntimeError):
+            ex.with_transport_retry(always, label="t")
+        self.assertEqual(len(calls), 2)
 
     def test_business_error_is_not_retried(self):
         calls = []

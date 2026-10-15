@@ -1923,7 +1923,9 @@ def with_transport_retry(fn: Any, *args: Any, label: str = "", **kwargs: Any) ->
     Chỉ thử lại khi `is_transport_error` — lỗi nghiệp vụ (403 chặn checkout, decline,
     promo không hợp lệ...) vẫn ném ra ngay để không đốt proxy/thời gian vô ích.
     """
-    attempts = max(1, env_int("UPI_TRANSPORT_RETRY", 3, minimum=1))
+    # Tầng request đã tự thử lại 3 lượt khi lỗi MỞ KẾT NỐI (UPI_CONNECT_RETRY), nên ở đây
+    # chỉ cần 2 lượt: tránh nhân lên 3×3 = 9 lần thử cho cùng một request.
+    attempts = max(1, env_int("UPI_TRANSPORT_RETRY", 2, minimum=1))
     delay = max(0.0, float(env_value("UPI_TRANSPORT_RETRY_DELAY", "1.5") or 1.5))
     last: BaseException | None = None
     for attempt in range(1, attempts + 1):
@@ -4239,6 +4241,12 @@ def run_single_link_attempt(
                 if not is_checkout_not_active_error(error):
                     record_failure_by_stage(f"checkout stage failed: {error}", checkout_proxy, "")
                 log(f"checkout {checkout_index}/{len(checkout_candidates)} failed: {error[:220]}", "[WARN] ")
+                if "checkout creation failed HTTP 403" in error:
+                    # Cloudflare/OpenAI chặn tạo checkout: đo thực tế 403 rải ĐỀU trên mọi
+                    # proxy (trung vị 92%, 419 proxy), nên thử proxy khác là vô ích — dừng
+                    # ngay để không đốt thêm 2 lượt checkout nữa (UPI_CHECKOUT_RETRY_MAX=3).
+                    log("checkout bị chặn 403 — không thử proxy khác cho chặng này", "[WARN] ")
+                    break
 
         _log_context.prefix = f"[UPI {attempt}/{upi_retry}] "
         if not checkout or not checkout_proxy_used:
