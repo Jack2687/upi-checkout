@@ -203,6 +203,22 @@ bang (5.810 ca) — địa chỉ Ấn Độ cứng + IP nước ngoài là tín 
 Trong số đơn ra mã, nhóm dùng list cứng chiếm ~6,5% (bỏ ngày 10-04 là artifact của bản code
 chưa có geo-IP).
 
+### Suy bang khi API geo không trả `region`
+
+Trong log có **34.908 ca `cannot canonicalise state '?'`** — kiểm lại thì **100% là `'?'`**,
+tức API **không trả về region**, chứ không phải tên bang viết khác, nên bảng alias tên bang
+không cứu được ca nào. Cách vá:
+
+* `geobilling._CITY_STATES` — bảng **510 thành phố → bang** (mọi bang, gồm cả tên cũ
+  Bangalore/Mysore/Belgaum và biến thể "Bengaluru Urban", "Mumbai Suburban District").
+* `geobilling.state_from_city()` dùng làm mắt cuối trong chuỗi suy bang của
+  `address_for_proxy()` (sau reverse geocode, `state_for_pin`, region của IP) và trong mức 1
+  của `extract_cs` khi `state_code_in()` thất bại.
+* Mức 1 cũng lấy **quận/huyện thật của PIN** (`pin_district()`) làm city khi reverse geocode
+  không trả city.
+* `canonical_state()` bỏ thêm tiền tố/hậu tố hay gặp: `State of Kerala`, `Kerala state`,
+  `Bihar, India`.
+
 ### Kiểm tra địa chỉ trước khi gửi (`billing check`)
 
 `extract_cs.verify_billing_address()` chạy ngay trong `upi_billing_profile()` (đầu mỗi round)

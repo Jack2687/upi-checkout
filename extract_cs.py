@@ -553,9 +553,20 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — reverse geocode là phần làm đẹp, không bắt buộc
         pass
 
+    if not city and postal:
+        # Reverse geocode không trả city nhưng có PIN -> lấy quận/huyện thật của PIN.
+        city = pin_district(postal)
     if not city or not postal:
         return {}                       # thiếu city/postal thì Stripe tax dễ toi -> fallback
     state_code = state_code_in(state_name, state_iso)
+    if not state_code:
+        # IP/geocoder không trả region (34.908 ca "cannot canonicalise state '?'") ->
+        # suy bang từ tên thành phố (bảng 510 thành phố của geobilling).
+        try:
+            import geobilling  # noqa: PLC0415
+            state_code = state_code_in(geobilling.state_from_city(city), "")
+        except Exception:  # noqa: BLE001
+            state_code = ""
     if not state_code:
         # Không map được mã bang -> KHÔNG gửi tên đầy đủ (dạng chưa từng chạy trong
         # luồng này). Thà rơi về list cứng còn hơn gửi state sai định dạng.
@@ -2120,6 +2131,19 @@ def pin_area_name(pin: str) -> str:
         areas = [str(a).strip() for a in (record.get("areas") or []) if str(a).strip()]
         return random.choice(areas[:8]) if areas else ""
     except Exception:  # noqa: BLE001 — tra được thì tốt, không thì thôi
+        return ""
+
+
+def pin_district(pin: str) -> str:
+    """Quận/huyện THẬT của PIN (India Post) — dùng khi reverse geocode không trả city."""
+    if not pin:
+        return ""
+    try:
+        os.environ.setdefault("UPI_STATE_DIR", str(SCRIPT_DIR / "cs_state"))
+        import geobilling  # noqa: PLC0415
+        record = geobilling._pin_record(str(pin), timeout=GEO_BILLING_TIMEOUT) or {}
+        return str(record.get("district") or "").strip()
+    except Exception:  # noqa: BLE001
         return ""
 
 
