@@ -122,7 +122,10 @@ def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
         limit = str(max(1, min(5, int(retry_limit))))
         values.update({
             "UPI_MAX_RETRY": limit,
-            "UPI_CHECKOUT_RETRY_MAX": limit,
+            # Số proxy ứng viên cho chặng checkout KHÔNG buộc theo `retries` của account:
+            # đây là chống proxy chết/chặn, đặt 1 thì trúng con hỏng là mất cả task.
+            # (Trước đây dòng này ghi đè "3" ở trên thành `limit` -> log hiện checkout-retry=1.)
+            "UPI_CHECKOUT_RETRY_MAX": str(max(3, int(limit))),
             "UPI_PROVIDER_RETRY_MAX": limit,
             "UPI_APPROVE_RETRY_MAX": limit,
             "UPI_MAX_APPROVE_BLOCKED": limit,

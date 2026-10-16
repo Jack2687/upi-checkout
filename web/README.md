@@ -190,6 +190,19 @@ Lưu ý: TLS fingerprint **đã** là Chrome thật (`curl_cffi` + `impersonate=
 `new_session`), nên hướng "đổi JA3" không cần làm nữa; đòn còn lại là telemetry id, uy tín
 account, và (đắt nhất) chạy payment element bằng browser thật.
 
+## Lỗi `400 Billing country must match request country`
+
+OpenAI từ chối tạo checkout vì "nước billing phải khớp nước của request" (dù proxy exit là IN
+theo ipwho). Đo trên 4.607 account từng dính: chỉ **22 (0,5%)** từng ra được mã ở job khác,
+so với ~3% chung ⇒ đây là chuyện **account/region**, không phải proxy hỏng. Nên:
+
+* trong flow: gặp lỗi này thì **break**, không thử proxy khác (trước đây thử thêm 2 lượt vô ích);
+* ở engine: đánh `no_retry` (`account region does not match the IN billing country`).
+
+Riêng số **proxy ứng viên cho chặng checkout** giờ **không buộc theo `retries`**: trước đây
+`_env_values()` ghi đè `UPI_CHECKOUT_RETRY_MAX=3` bằng `retries` nên log hiện
+`checkout-retry=1` — nay là `max(3, retries)`.
+
 ## Chính sách retry theo loại lỗi (audit)
 
 Đo trên **3.965 task có ≥2 lượt chạy** trong log còn giữ: **0 lần retry nào ra được link**, và

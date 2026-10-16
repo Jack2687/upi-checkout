@@ -4241,6 +4241,14 @@ def run_single_link_attempt(
                 if not is_checkout_not_active_error(error):
                     record_failure_by_stage(f"checkout stage failed: {error}", checkout_proxy, "")
                 log(f"checkout {checkout_index}/{len(checkout_candidates)} failed: {error[:220]}", "[WARN] ")
+                if "Billing country must match request country" in error:
+                    # OpenAI từ chối vì "nước billing phải khớp nước của request": đo 4.607
+                    # account dính lỗi này thì chỉ 22 (0,5%) từng ra được mã ở job khác ->
+                    # đây là chuyện của ACCOUNT/region, không phải proxy hỏng, nên thử proxy
+                    # khác cũng vô ích.
+                    log("checkout 400: nước billing không khớp nước request (lỗi account) — "
+                        "không thử proxy khác", "[WARN] ")
+                    break
                 if "checkout creation failed HTTP 403" in error:
                     # Cloudflare/OpenAI chặn tạo checkout: đo thực tế 403 rải ĐỀU trên mọi
                     # proxy (trung vị 92%, 419 proxy), nên thử proxy khác là vô ích — dừng

@@ -1565,6 +1565,11 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
         # Stripe chỉ trả link hosted, không mở được đường UPI ₹0 -> lỗi cấp account/session.
         task.no_retry = True
         task.no_retry_reason = "no ₹0 UPI path for this account (hosted link only)"
+    elif "billing country must match" in (task.error or "").lower():
+        # 4.607 account dính lỗi này -> chỉ 0,5% từng ra mã (so với ~3% chung) => cấp account.
+        task.no_retry = True
+        task.no_retry_reason = ("account region does not match the IN billing country "
+                                "(OpenAI 400) — retry cannot fix it")
     elif "blocked checkout creation" in (task.error or ""):
         # Cloudflare chặn ngay bước tạo checkout: lần chạy lại gần như chắc chắn bị chặn
         # tiếp (đo thật 12 job gần nhất: 2.209 lần thử lại sau 403 -> 0 lần ra link),

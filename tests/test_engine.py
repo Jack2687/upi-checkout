@@ -479,6 +479,14 @@ class RetryPolicyTests(unittest.TestCase):
         t = self.finish("no QR link extracted — only a hosted checkout link (https://x)")
         self.assertTrue(t.no_retry)
 
+    def test_billing_country_mismatch_is_account_level(self):
+        # OpenAI 400 "Billing country must match request country": 4.607 account dính, chỉ
+        # 0,5% từng ra mã (so với ~3% chung) -> không đáng retry.
+        t = self.finish('checkout creation failed HTTP 400: {"detail":'
+                        '"Billing country must match request country."}')
+        self.assertTrue(t.no_retry)
+        self.assertIn("region", t.no_retry_reason)
+
     def test_transport_and_timeout_are_still_retried(self):
         self.assertFalse(self.finish("proxy transport error at 'provider' stage").no_retry)
         self.assertFalse(self.finish("timeout 240s").no_retry)
