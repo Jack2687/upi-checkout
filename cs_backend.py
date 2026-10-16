@@ -112,7 +112,8 @@ def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
         # Nhãn task trong log flow: log flow dùng CHUNG 1 file cho cả job nên không
         # có nhãn thì không quy được dòng nào của task nào (vd không so được task
         # đăng ký telemetry thành công với task thất bại trong cùng job).
-        "UPI_TASK_LABEL": f"t{idx}",
+        # Trung voi task_id tren UI (`t{i+1}` trong engine) de dumps/t3 dung la acc t3.
+        "UPI_TASK_LABEL": f"t{idx + 1}",
     }
     if dump_traffic:
         # Ghi MỌI call HTTP của task (kèm header, cả phần sentinel_runner.js) vào

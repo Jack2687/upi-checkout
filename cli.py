@@ -1058,7 +1058,7 @@ def cs_subprocess_one(token: str, proxy_path: Path, promo: str, state_dir: Path,
         "PYTHONUNBUFFERED": "1",
         # Nhan rieng cho tung task: tien trinh cha ghi dump voi nhan "cli", con cua no phai
         # ghi vao file rieng, khong thi 2 luong traffic tron vao nhau.
-        "UPI_TASK_LABEL": f"t{idx}",
+        "UPI_TASK_LABEL": f"t{idx + 1}",
         "UPI_TOKEN": token,
         "UPI_PROXY_SEED_FILE": str(proxy_path.resolve()),
         "UPI_PROXY_STATE_FILE": str(sf),
