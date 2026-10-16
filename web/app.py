@@ -17,6 +17,7 @@ import asyncio
 import json
 import queue
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,12 @@ app = FastAPI(title="UPI QR Extractor", docs_url=None, redoc_url=None)
 # Vòng dò link chạy NỀN trong process server: đóng browser vẫn biết khách quét lúc
 # nào / link chết sau bao lâu. Bật ở đây (không bật khi import engine) để test và
 # CLI không dính tác dụng phụ.
+# Nạp link của các job CŨ (đọc từ snapshot trên đĩa) vào sổ theo dõi: job chỉ sống trong
+# RAM, mà khách có thể duyệt uỷ nhiệm ₹0 sau nhiều giờ — không nạp thì link cũ đứng im ở
+# "Awaiting payment" mãi. Chạy ở thread riêng để không làm chậm lúc khởi động (đọc vài chục
+# file JSON vài MB).
+threading.Thread(target=engine.backfill_link_watch_from_disk, name="link-backfill",
+                 daemon=True).start()
 engine.start_link_monitor()
 
 HEARTBEAT_SECS = 15.0
@@ -185,9 +192,11 @@ def api_results(job_id: str) -> dict:
 
 @app.get("/api/state/{job_id}")
 def api_state(job_id: str) -> dict:
-    job = engine.get_job(job_id)
-    if job:
-        return job.snapshot()
+    # `get_job_overlay` = snapshot của job trong RAM đã trộn trạng thái link mới nhất từ sổ
+    # theo dõi bền vững (link của job cũ vẫn được dò tiếp sau restart).
+    live = engine.get_job_overlay(job_id)
+    if live is not None:
+        return live
     snapshot = engine.get_saved_snapshot(job_id)
     if snapshot is None:
         raise HTTPException(404, "job does not exist")

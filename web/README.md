@@ -304,6 +304,28 @@ Nay:
 Vì mỗi job chỉ có vài link sống (7 link / 5.859 acc trong job đo được), chi phí theo dõi 24h
 là không đáng kể, và mọi request dò đều đi qua proxy của chính task đó.
 
+### Sổ theo dõi bền vững (`cs_state/link_watch.json`)
+
+Nguyên nhân sâu hơn: **job chỉ sống trong RAM**, restart desk là mất — mà vòng dò cũ chỉ nhìn
+`_JOBS` trong RAM. Nên link của job cũ không ai dò nữa dù khách có duyệt sau đó.
+
+* Mỗi link được ghi vào sổ (link, proxy của task, trạng thái, mốc dò, `first_seen/flip_at`,
+  trạng thái Plus) — sổ nhỏ (16 entry cho ~30 job), được ghi lại sau mỗi lần dò.
+* Vòng dò đọc **sổ** chứ không đọc RAM → job cũ vẫn được dò tiếp; nếu job còn trong RAM thì
+  Task + SSE cũng được cập nhật như trước.
+* `/api/state` trộn trạng thái link mới nhất từ sổ vào snapshot đọc từ đĩa
+  (`engine.link_watch_overlay`) — không phải ghi lại file snapshot 18 MB mỗi lần dò.
+* Lúc khởi động desk chạy `backfill_link_watch_from_disk()` (thread riêng) để nạp link của các
+  job cũ vào sổ; mỗi lần mở một job cũ cũng nạp bù (`backfill_link_watch`).
+
+Đo lại ngay sau khi bật: sổ có **16 link**, trong đó **8 link đã được khách duyệt
+(`succeeded`)** — 6 trong số đó trước đây UI hiển thị nhầm là "Awaiting payment". 8 link còn
+lại đã 28–33 giờ tuổi, quá cửa sổ 24h nên được bỏ theo dõi (phiên Stripe đã chết).
+
+Giới hạn còn lại: snapshot **không lưu token** (cố ý — token là bí mật), nên link của job cũ
+khi chuyển sang `succeeded` sẽ **không** tự chạy được bước dò Plus (badge "Plus Success" chỉ
+hiện với job còn trong RAM).
+
 ## Rà soát rò IP thật (leak) — mọi request ra ngoài phải qua proxy
 
 Dump toàn bộ API (mục trên) cho phép soi lại từng request, và phát hiện các chỗ **gọi thẳng

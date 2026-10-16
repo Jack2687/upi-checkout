@@ -462,6 +462,14 @@ _JOB_ORDER: list[str] = []
 _JOBS_LOCK = threading.Lock()
 
 
+def get_job_overlay(job_id: str) -> dict | None:
+    """Snapshot của job đang trong RAM, đã trộn trạng thái link từ sổ."""
+    job = _JOBS.get(job_id)
+    if job is None:
+        return None
+    return link_watch_overlay(job.snapshot())
+
+
 def get_job(job_id: str) -> Job | None:
     return _JOBS.get(job_id)
 
@@ -483,6 +491,169 @@ MONITOR_COLD_SECS = float(os.environ.get("UPI_MONITOR_COLD_SECS", "300") or 300)
 MONITOR_MAX_IDLE_MIN = float(os.environ.get("UPI_MONITOR_MAX_IDLE_MIN", "1440") or 1440)
 
 
+# ---------------------------------------------------------------------------
+# Sổ theo dõi link (BỀN VỮNG) — vì sao cần: job chỉ sống trong RAM, restart desk là mất,
+# mà uỷ nhiệm ₹0 thì khách có thể duyệt MUỘN (nhiều giờ sau). Trước đây vòng dò chỉ nhìn
+# `_JOBS` trong RAM nên sau restart/30 phút là chip "Awaiting payment" đứng im vĩnh viễn —
+# đo thật trên job 3dcd91d4f58a: 2 link đã được khách duyệt (`intent_state=succeeded`) mà UI
+# vẫn ghi "Awaiting payment".
+# ---------------------------------------------------------------------------
+LINK_LEDGER_PATH = STATE_DIR / "link_watch.json"
+_LINK_LEDGER: dict[str, dict] = {}
+_LINK_LEDGER_LOCK = threading.RLock()
+_LINK_LEDGER_LOADED = False
+LINK_LEDGER_CAP = 20000
+
+
+def _ledger_key(job_id: str, task_id: str) -> str:
+    return f"{job_id}|{task_id}"
+
+
+def _ledger_load() -> None:
+    global _LINK_LEDGER_LOADED
+    with _LINK_LEDGER_LOCK:
+        if _LINK_LEDGER_LOADED:
+            return
+        _LINK_LEDGER_LOADED = True
+        try:
+            data = json.loads(LINK_LEDGER_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _LINK_LEDGER.update({k: v for k, v in data.items() if isinstance(v, dict)})
+        except (OSError, json.JSONDecodeError):
+            pass
+
+
+def _ledger_save() -> None:
+    with _LINK_LEDGER_LOCK:
+        if len(_LINK_LEDGER) > LINK_LEDGER_CAP:
+            # Bỏ những entry cũ nhất (theo lần dò) để file không phình vô hạn.
+            for key, _ in sorted(_LINK_LEDGER.items(),
+                                 key=lambda kv: kv[1].get("checked_at") or 0)[:2000]:
+                _LINK_LEDGER.pop(key, None)
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            temp = LINK_LEDGER_PATH.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(_LINK_LEDGER, ensure_ascii=False,
+                                       separators=(",", ":")), encoding="utf-8")
+            temp.replace(LINK_LEDGER_PATH)
+        except OSError:
+            pass
+
+
+def link_watch_upsert(job_id: str, task_id: str, link: str, proxy: str = "",
+                      **fields) -> dict:
+    """Ghi/ cập nhật một link vào sổ theo dõi."""
+    _ledger_load()
+    with _LINK_LEDGER_LOCK:
+        entry = _LINK_LEDGER.setdefault(_ledger_key(job_id, task_id), {})
+        if link:
+            entry["link"] = link
+        if proxy:
+            entry["proxy"] = proxy
+        entry["job_id"] = job_id
+        entry["task_id"] = task_id
+        entry.update({k: v for k, v in fields.items() if v is not None})
+        entry["updated_at"] = int(time.time())
+        return dict(entry)
+
+
+def link_watch_get(job_id: str, task_id: str) -> dict:
+    _ledger_load()
+    with _LINK_LEDGER_LOCK:
+        return dict(_LINK_LEDGER.get(_ledger_key(job_id, task_id)) or {})
+
+
+def backfill_link_watch(snapshot: dict) -> int:
+    """Nạp link của một snapshot cũ vào sổ theo dõi. Trả số entry mới.
+
+    Vì sao cần: sổ chỉ được ghi từ lúc tính năng này có mặt, nên link của các job CŨ (như
+    `3dcd91d4f58a` — 2 link đã được khách duyệt mà UI vẫn ghi "Awaiting payment") không tự
+    nhiên có trong sổ. Hàm này chạy mỗi lần đọc snapshot từ đĩa + một lần lúc khởi động.
+    """
+    if not isinstance(snapshot, dict):
+        return 0
+    job_id = str(snapshot.get("job_id") or "")
+    tasks = snapshot.get("tasks")
+    if not job_id or not isinstance(tasks, list):
+        return 0
+    _ledger_load()
+    added = 0
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        link = str((task.get("artifact") or {}).get("upi_link") or "")
+        if not link or not artifact_probe.is_upi_instructions_url(link):
+            continue
+        if str(task.get("link_state") or "") in LINK_TERMINAL:
+            continue
+        task_id = str(task.get("task_id") or "")
+        if not task_id or link_watch_get(job_id, task_id):
+            continue
+        link_watch_upsert(job_id, task_id, link,
+                          str((task.get("egress") or {}).get("proxy")
+                              or task.get("proxy") or ""),
+                          state=str(task.get("link_state") or "waiting"),
+                          checked_at=int(task.get("link_checked_at") or 0) or int(time.time()),
+                          first_seen=int(task.get("link_first_seen") or 0) or int(time.time()),
+                          flip_at=int(task.get("link_flip_at") or 0),
+                          fam=str(task.get("link_fam") or ""),
+                          zero=bool(task.get("link_zero")),
+                          note=str(task.get("link_note") or ""))
+        added += 1
+    if added:
+        _ledger_save()
+    return added
+
+
+def backfill_link_watch_from_disk(max_age_hours: float = 48.0) -> int:
+    """Quét các snapshot gần đây trên đĩa và nạp link vào sổ (gọi lúc khởi động desk)."""
+    cutoff = time.time() - max_age_hours * 3600
+    total = 0
+    try:
+        files = sorted(LOG_DIR.glob("web_*_results.json"))
+    except OSError:
+        return 0
+    for path in files:
+        try:
+            if path.stat().st_mtime < cutoff:
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        total += backfill_link_watch(data)
+    return total
+
+
+def link_watch_overlay(snapshot: dict) -> dict:
+    """Trộn trạng thái link mới nhất từ sổ vào snapshot đọc từ đĩa.
+
+    Nhờ vậy UI (`/api/state`) vẫn thấy trạng thái đúng cho job cũ — không phải ghi lại file
+    snapshot 18 MB mỗi lần dò được một link.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    job_id = str(snapshot.get("job_id") or "")
+    tasks = snapshot.get("tasks")
+    if not job_id or not isinstance(tasks, list):
+        return snapshot
+    _ledger_load()
+    with _LINK_LEDGER_LOCK:
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            entry = _LINK_LEDGER.get(_ledger_key(job_id, str(task.get("task_id") or "")))
+            if not entry:
+                continue
+            for src, dst in (("state", "link_state"), ("checked_at", "link_checked_at"),
+                             ("flip_at", "link_flip_at"), ("first_seen", "link_first_seen"),
+                             ("fam", "link_fam"), ("zero", "link_zero"), ("note", "link_note"),
+                             ("plus_state", "plus_state"), ("plus_checked_at", "plus_checked_at"),
+                             ("plus_note", "plus_note")):
+                if entry.get(src) is not None:
+                    task[dst] = entry[src]
+    return snapshot
+
+
 def _job_idle_minutes(job: Job, now: float) -> float:
     """Số phút kể từ lúc job xong (0 nếu còn đang chạy)."""
     if not job.finished_at:
@@ -494,32 +665,30 @@ def _job_idle_minutes(job: Job, now: float) -> float:
     return max(0.0, (now - end) / 60.0)
 
 
-def _link_monitor_targets() -> tuple[list[tuple[Job, Task]], list[tuple[Job, Task]]]:
-    """Task cần dò, chia 2 nhóm: `(hot, cold)`.
+def _link_monitor_targets() -> tuple[list[dict], list[dict]]:
+    """Link cần dò, chia `(hot, cold)` — lấy từ SỔ BỀN VỮNG, không phải từ RAM.
 
-    hot = job còn chạy hoặc vừa xong (dò mỗi MONITOR_SECS)
-    cold = job đã xong lâu hơn MONITOR_HOT_IDLE_MIN (dò mỗi MONITOR_COLD_SECS cho tới
-           MONITOR_MAX_IDLE_MIN phút)
+    hot = vừa có link (dò mỗi MONITOR_SECS), cold = link đã cũ (dò mỗi MONITOR_COLD_SECS),
+    bỏ hẳn sau MONITOR_MAX_IDLE_MIN phút kể từ lần dò cuối.
     """
     now = time.time()
-    hot: list[tuple[Job, Task]] = []
-    cold: list[tuple[Job, Task]] = []
-    with _JOBS_LOCK:
-        jobs = list(_JOBS.values())
-    for job in jobs:
-        idle = _job_idle_minutes(job, now)
-        if idle > MONITOR_MAX_IDLE_MIN:
+    hot: list[dict] = []
+    cold: list[dict] = []
+    _ledger_load()
+    with _LINK_LEDGER_LOCK:
+        entries = [dict(v) for v in _LINK_LEDGER.values()]
+    for entry in entries:
+        link = str(entry.get("link") or "")
+        if not link or not artifact_probe.is_upi_instructions_url(link):
             continue
-        bucket = hot if idle <= MONITOR_HOT_IDLE_MIN else cold
-        with job._lock:
-            tasks = list(job.tasks.values())
-        for task in tasks:
-            link = (task.artifact or {}).get("upi_link") or ""
-            if not link or not artifact_probe.is_upi_instructions_url(link):
-                continue
-            if task.link_state in LINK_TERMINAL:
-                continue
-            bucket.append((job, task))
+        if str(entry.get("state") or "") in LINK_TERMINAL:
+            continue
+        last = float(entry.get("checked_at") or entry.get("first_seen") or 0)
+        if last and (now - last) / 60.0 > MONITOR_MAX_IDLE_MIN:
+            continue
+        entry["_key"] = _ledger_key(str(entry.get("job_id") or ""),
+                                    str(entry.get("task_id") or ""))
+        (hot if (now - last) <= MONITOR_HOT_IDLE_MIN * 60 else cold).append(entry)
     return hot, cold
 
 
@@ -532,39 +701,56 @@ def _task_proxy(task: Task) -> str:
     return str(task.proxy or (task.egress or {}).get("proxy") or "")
 
 
-def _monitor_one(job: Job, task: Task) -> None:
-    link = (task.artifact or {}).get("upi_link") or ""
-    probe = artifact_probe.probe(link, fresh=True, proxy=_task_proxy(task))
+def _monitor_one(entry: dict) -> None:
+    """Dò 1 link trong sổ: cập nhật sổ + (nếu job còn trong RAM) cập nhật Task và báo UI."""
+    link = str(entry.get("link") or "")
+    job_id = str(entry.get("job_id") or "")
+    task_id = str(entry.get("task_id") or "")
+    proxy = str(entry.get("proxy") or "")
+    old = str(entry.get("state") or "")
+    first_seen = int(entry.get("first_seen") or 0)
+    probe = artifact_probe.probe(link, fresh=True, proxy=proxy)
     now = int(time.time())
-    if not task.link_first_seen:
-        task.link_first_seen = now
-    task.link_checked_at = now
-
+    fields: dict = {"checked_at": now, "first_seen": first_seen or now}
     if not probe.get("ok"):
         err = str(probe.get("error") or "")
         if artifact_probe.is_inconclusive(err):
+            link_watch_upsert(job_id, task_id, link, proxy, **fields)
+            _ledger_save()
             return                      # chưa đọc được -> giữ nguyên trạng thái cũ
-        new_state, fam, zero, note = "failed", task.link_fam, False, "link unreadable: %s" % err
+        new_state, fam, zero = "failed", str(entry.get("fam") or ""), False
+        note = "link unreadable: %s" % err
     else:
         new_state = str(probe.get("status") or "")
-        fam = str(probe.get("fam") or "")
+        fam = str(probe.get("fam") or "") or str(entry.get("fam") or "")
         zero = bool(probe.get("zero_mandate"))
         note = str(probe.get("zero_label") or "")
 
-    old = task.link_state
+    fields.update({"state": new_state, "fam": fam, "zero": zero, "note": note,
+                   "flip_at": int(entry.get("flip_at") or 0) or now})
+    link_watch_upsert(job_id, task_id, link, proxy, **fields)
+    _ledger_save()
+
+    job = _JOBS.get(job_id)
+    if job is None:
+        return                          # job cũ (chỉ còn trên đĩa) -> sổ là nguồn sự thật
+    with job._lock:
+        task = job.tasks.get(task_id)
+    if task is None:
+        return
+    task.link_first_seen = fields["first_seen"]
+    task.link_checked_at = now
     task.link_fam = fam or task.link_fam
     task.link_zero = zero
     task.link_note = note
     if new_state == old:
         # Trạng thái không đổi vẫn phải báo mốc vừa dò, để UI hiện "checked Xm ago" thay vì
         # một chip "Awaiting payment" đứng im mà không biết còn được theo dõi hay không.
-        job.emit({"type": "task_link_checked", "task_id": task.task_id,
-                  "link_checked_at": now})
+        job.emit({"type": "task_link_checked", "task_id": task_id, "link_checked_at": now})
         return
-
     task.link_state = new_state
     task.link_flip_at = now
-    age = now - (task.link_first_seen or now)
+    age = now - fields["first_seen"]
     label = {
         "succeeded": "CUSTOMER SCANNED — mandate succeeded",
         "failed": "link dead (Stripe declined / QR expired)",
@@ -572,12 +758,11 @@ def _monitor_one(job: Job, task: Task) -> None:
         "expired": "link expired, never scanned",
     }.get(new_state, "state=%s" % (new_state or "?"))
     job.log_line("[%s] link: %s -> %s sau %ds (%s; zero=%s fam=%s)"
-                 % (task.task_id, old or "unknown", new_state or "?", age,
+                 % (task_id, old or "unknown", new_state or "?", age,
                     label, zero, fam or "?"))
-    job.emit({"type": "task_link", "task_id": task.task_id, "link_state": new_state,
+    job.emit({"type": "task_link", "task_id": task_id, "link_state": new_state,
               "link_checked_at": now, "link_flip_at": now, "link_fam": task.link_fam,
               "link_zero": zero, "link_note": note, "age": age, "probe": probe})
-
     if new_state == "succeeded":
         # Khách vừa duyệt mandate -> bắt đầu dò xem acc có lên Plus không.
         _start_plus_check(job, task)
@@ -665,7 +850,7 @@ def _link_monitor_loop() -> None:
             if due_cold:
                 last_cold = now
             with ThreadPoolExecutor(max_workers=max(1, MONITOR_CONC)) as ex:
-                list(ex.map(lambda jt: _monitor_one(*jt), targets))
+                list(ex.map(_monitor_one, targets))
         except Exception as exc:  # noqa: BLE001 — vòng nền không được chết
             try:
                 print("[link-monitor] poll loop error: %s" % str(exc)[:160], flush=True)
@@ -832,6 +1017,10 @@ def get_saved_snapshot(job_id: str) -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
+    # Trạng thái link mới nhất nằm ở sổ theo dõi (xem link_watch_overlay) — job cũ vẫn phải
+    # hiện đúng "khách đã duyệt / hết hạn" chứ không đứng im ở "Awaiting payment".
+    link_watch_overlay(data)
+    backfill_link_watch(data)
     # A saved running job without an owner was interrupted by server exit.
     # Never silently resume payment work or show phantom running workers.
     if job_id not in _JOBS and data.get("status") == "running":
@@ -1573,6 +1762,10 @@ def _verify_link(job: Job, task: Task, result: dict, link: str) -> None:
         return
 
     task.link_state = str(probe.get("status") or "")
+    # Ghi vào SỔ BỀN VỮNG: job chỉ sống trong RAM, mà khách có thể duyệt uỷ nhiệm sau nhiều giờ.
+    link_watch_upsert(job.job_id, task.task_id, link, _task_proxy(task),
+                      state=task.link_state, checked_at=now, first_seen=now, flip_at=now,
+                      fam=task.link_fam, zero=bool(task.link_zero), note=task.link_note)
     if task.link_state == "succeeded":
         # Mandate đã được duyệt ngay lúc task xong -> dò Plus luôn (khỏi chờ monitor).
         _start_plus_check(job, task)
