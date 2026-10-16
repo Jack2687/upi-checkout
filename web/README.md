@@ -218,8 +218,11 @@ hiệu thiết bị, và **advanced risk factors** thu qua **Radar Session** là
 | 16/10 | `4f9dd5274076` | 77/77 task không tạo được session (dạng body `key+mids[0]` bị `parameter_unknown`) |
 | 16/10 | `b3971ef1e10b` | `rse_…` tạo được **ngay** ở dạng `key+muid+sid+guid` (89/89), nhưng `radar_options[session]` khi tạo PM trả `400 parameter_unknown — Received unknown parameter: radar_options` ⇒ **89/100 task chết** |
 | 16/10 | `5f19288946e2` | bản tự hạ cấp chạy đúng: task tạo PM xong, nhưng 2/2 acc vào tới Stripe vẫn `generic_decline` |
+| 16/10 | probe trực tiếp | **ghim header `Stripe-Version` cũng không cứu được**: `2025-03-31.basil` và `2025-06-30.basil` đều trả `400 parameter_unknown — Received unknown parameter: radar_options` (probe gọi thẳng `POST /v1/payment_methods` bằng `pk_live_…` thật + `rse_…` thật) |
 
-Kết luận: API version của tài khoản **không có** `radar_options`, nên Radar Session không thể
+Kết luận: `radar_options` **không phải** chuyện API version (đã thử ghim cả `2025-03-31.basil`
+lẫn `2025-06-30.basil` — vẫn `parameter_unknown`); tham số này không khả dụng cho publishable
+key/tài khoản này, nên Radar Session không thể
 gắn vào luồng này; giữ lại chỉ tốn 1 request/task và có nguy cơ giết task nếu Stripe đổi lỗi.
 ⇒ **đã xoá** `stripe_radar_session()` và đoạn đính `radar_options`. Giữ lại
 `stripe_telemetry_ids()` (m.stripe.com) vì nó còn dùng để điền `guid/muid` **thật** vào payload
