@@ -19,8 +19,9 @@ import engine  # noqa: E402
 LINK = "https://payments.stripe.com/upi/instructions/abc123"
 
 
-def fake_task(state="waiting", link=LINK, task_id="t1"):
-    return SimpleNamespace(task_id=task_id, artifact={"upi_link": link}, link_state=state)
+def fake_task(state="waiting", link=LINK, task_id="t1", proxy=""):
+    return SimpleNamespace(task_id=task_id, artifact={"upi_link": link}, link_state=state,
+                           proxy=proxy, egress=None)
 
 
 def fake_job(minutes_since_finish: float | None, tasks):
@@ -89,8 +90,11 @@ class LinkMonitorTargetTests(unittest.TestCase):
         task.link_checked_at = 0
         task.link_first_seen = 0
         task.proxy = ""
+        task.egress = {"proxy": "http://user:pass@px:8080"}
+        seen: dict = {}
         with patch.object(engine.artifact_probe, "probe",
-                          return_value={"ok": True, "status": "waiting"}):
+                          side_effect=lambda *a, **k: (seen.update(k) or
+                                                       {"ok": True, "status": "waiting"})):
             engine._monitor_one(job, task)
         self.assertEqual([e["type"] for e in emitted], ["task_link_checked"])
         self.assertGreater(task.link_checked_at, 0)

@@ -523,9 +523,18 @@ def _link_monitor_targets() -> tuple[list[tuple[Job, Task]], list[tuple[Job, Tas
     return hot, cold
 
 
+def _task_proxy(task: Task) -> str:
+    """Proxy để dò link: ưu tiên `task.proxy`, không có thì lấy từ egress đã lưu.
+
+    Task cũ (lưu trước khi có field `proxy`) chỉ có proxy trong `egress` — vẫn phải dùng nó,
+    nếu không việc dò link sẽ đi thẳng bằng IP thật của máy.
+    """
+    return str(task.proxy or (task.egress or {}).get("proxy") or "")
+
+
 def _monitor_one(job: Job, task: Task) -> None:
     link = (task.artifact or {}).get("upi_link") or ""
-    probe = artifact_probe.probe(link, fresh=True, proxy=task.proxy)
+    probe = artifact_probe.probe(link, fresh=True, proxy=_task_proxy(task))
     now = int(time.time())
     if not task.link_first_seen:
         task.link_first_seen = now
@@ -1536,7 +1545,7 @@ def _verify_link(job: Job, task: Task, result: dict, link: str) -> None:
     """
     if not link or not artifact_probe.is_upi_instructions_url(link):
         return
-    probe = artifact_probe.probe(link, proxy=task.proxy)
+    probe = artifact_probe.probe(link, proxy=_task_proxy(task))
     result["intent_state"] = probe.get("intent_state")
     result["fam"] = probe.get("fam")
     result["am"] = probe.get("am")
