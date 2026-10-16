@@ -72,6 +72,7 @@ class RunRequest(BaseModel):
     mix: bool = Field(default=False, description="shuffle the pool before assigning proxies")
     filter_proxies: bool = Field(default=True, description="probe + drop dead/wrong-country proxies")
     stripe_telemetry: bool = Field(default=False, description="register the Stripe session at m.stripe.com")
+    dump_traffic: bool = Field(default=False, description="save every API call (headers + body) as HAR entries under dumps/")
 
 
 class AppendRequest(BaseModel):
@@ -131,7 +132,7 @@ def api_run(req: RunRequest) -> dict:
     try:
         job = engine.start_job(tokens, req.mode, req.country, req.promo,
                                req.workers, req.proxies, req.retries, req.mix,
-                               req.filter_proxies, req.stripe_telemetry)
+                               req.filter_proxies, req.stripe_telemetry, req.dump_traffic)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"job_id": job.job_id, "total": job.total}

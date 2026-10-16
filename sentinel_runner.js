@@ -316,10 +316,82 @@ function httpRequestViaHttpProxy({ proxyText, method, urlText, body = "", header
   });
 }
 
-function httpRequest(opts) {
+function dumpEnabled() {
+  return process.env.UPI_DUMP === "1" && Boolean(process.env.UPI_DUMP_FILE);
+}
+
+/* Header ghi NGUYÊN VĂN (không che) — dumps/ đã bị .gitignore, cần đủ dữ liệu để so/replay. */
+function dumpHeaders(headers) {
+  return Object.entries(headers || {}).map(([name, value]) => ({ name, value: String(value) }));
+}
+
+/*
+ * Ghi 1 HAR entry cho traffic cua Node (cung dinh dang voi traffic_dump.py) vao
+ * UPI_DUMP_FILE, de file dump cua task co du ca phan Python lan sentinel.
+ * Loi ghi dump khong bao gio duoc lam hong luong -> tat ca trong try/catch.
+ */
+function dumpTraffic({ method, urlText, headers, body, status, responseHeaders, text, error, startedMs, source }) {
+  if (!dumpEnabled()) return;
+  try {
+    const started = startedMs || Date.now();
+    const target = new URL(urlText);
+    const reqText = body == null ? "" : String(body);
+    const resText = text == null ? "" : String(text);
+    const entry = {
+      startedDateTime: new Date(started).toISOString(),
+      time: Date.now() - started,
+      request: {
+        method: String(method || "GET").toUpperCase(),
+        url: urlText,
+        httpVersion: "HTTP/1.1",
+        cookies: [],
+        queryString: [...target.searchParams].map(([name, value]) => ({ name, value })),
+        headers: dumpHeaders(headers),
+        headersSize: -1,
+        bodySize: Buffer.byteLength(reqText),
+        postData: reqText ? { mimeType: "application/json", text: reqText.slice(0, 200000) } : null,
+      },
+      response: {
+        status: Number(status || 0),
+        statusText: error ? String(error).slice(0, 300) : "",
+        httpVersion: "HTTP/1.1",
+        cookies: [],
+        headers: dumpHeaders(responseHeaders),
+        headersSize: -1,
+        content: {
+          size: Buffer.byteLength(resText),
+          mimeType: String((responseHeaders && responseHeaders["content-type"]) || ""),
+          text: resText.slice(0, 200000),
+        },
+        bodySize: Buffer.byteLength(resText),
+      },
+      cache: {},
+      timings: { send: 0, wait: Date.now() - started, receive: 0 },
+      host: target.host,
+      path: target.pathname,
+      error: error || "",
+      source: source || "sentinel_runner.js",
+    };
+    fs.appendFileSync(process.env.UPI_DUMP_FILE, JSON.stringify(entry) + "\n");
+  } catch {
+    /* dump la phu tro */
+  }
+}
+
+async function httpRequest(opts) {
   const proxy = normalizeProxy(opts.proxy || "");
-  if (proxy) return httpRequestViaHttpProxy({ ...opts, proxyText: proxy });
-  return httpRequestDirect(opts);
+  const started = Date.now();
+  try {
+    const result = proxy
+      ? await httpRequestViaHttpProxy({ ...opts, proxyText: proxy })
+      : await httpRequestDirect(opts);
+    dumpTraffic({ ...opts, status: result.status, responseHeaders: result.headers,
+                  text: result.text, startedMs: started });
+    return result;
+  } catch (err) {
+    dumpTraffic({ ...opts, error: String(err && err.message ? err.message : err), startedMs: started });
+    throw err;
+  }
 }
 
 async function fetchText({ url, headers, timeoutMs, proxy }) {
@@ -382,26 +454,55 @@ headers = json.loads(sys.argv[5] if len(sys.argv) > 5 else "{}")
 def out(text):
     sys.stdout.buffer.write(str(text or "").encode("utf-8"))
     raise SystemExit(0)
+import os as _os, time as _time, json as _json
+_DUMP = _os.environ.get("UPI_DUMP_FILE", "") if _os.environ.get("UPI_DUMP") == "1" else ""
+def _dump(resp, err=""):
+    """Ghi traffic cua nhanh python fallback vao cung file HAR JSONL cua task."""
+    if not _DUMP:
+        return
+    try:
+        from urllib.parse import urlsplit as _urlsplit
+        def _h(h):
+            return [{"name": str(k), "value": str(v)} for k, v in dict(h or {}).items()]
+        _p = _urlsplit(url)
+        _t = str(getattr(resp, "text", "") or "") if resp is not None else ""
+        _entry = {
+            "startedDateTime": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "time": 0,
+            "request": {"method": "POST", "url": url, "headers": _h(headers),
+                        "bodySize": len(body), "postData": {"mimeType": "application/json", "text": body}},
+            "response": {"status": int(getattr(resp, "status_code", 0) or 0),
+                         "headers": _h(getattr(resp, "headers", {})),
+                         "content": {"size": len(_t), "text": _t[:200000]}, "bodySize": len(_t)},
+            "host": _p.netloc, "path": _p.path, "error": err,
+            "source": "sentinel_runner.py-fallback",
+        }
+        open(_DUMP, "a", encoding="utf-8").write(_json.dumps(_entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 try:
     from curl_cffi import requests as curl_requests
     kwargs = {"data": body, "headers": headers, "timeout": timeout, "impersonate": "chrome"}
     if proxy:
         kwargs["proxies"] = {"http": proxy, "https": proxy}
     r = curl_requests.post(url, **kwargs)
+    _dump(r)
     if 200 <= int(r.status_code) < 300:
         out(r.text)
-except Exception:
-    pass
+except Exception as _exc:
+    _dump(None, str(_exc))
 try:
     import requests
     kwargs = {"data": body.encode("utf-8"), "headers": headers, "timeout": timeout, "verify": False}
     if proxy:
         kwargs["proxies"] = {"http": proxy, "https": proxy}
     r = requests.post(url, **kwargs)
+    _dump(r)
     if 200 <= int(r.status_code) < 300:
         out(r.text)
     raise RuntimeError("HTTP %s: %s" % (getattr(r, "status_code", "?"), (getattr(r, "text", "") or "")[:160]))
 except Exception as exc:
+    _dump(None, str(exc))
     sys.stderr.write(str(exc))
     raise SystemExit(1)
 `;

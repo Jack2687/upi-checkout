@@ -49,6 +49,7 @@ class BackendRequest:
     promo: str
     retry_limit: int
     stripe_telemetry: bool = False
+    dump_traffic: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,7 @@ def _run_cs_inprocess(request: BackendRequest, hooks: BackendHooks) -> dict:
         retry_limit=request.retry_limit,
         country=request.country,
         stripe_telemetry=request.stripe_telemetry,
+        dump_traffic=request.dump_traffic,
     )
     hooks.step("runner", "done")
     payload: dict[str, Any] = dict(raw.data or {})

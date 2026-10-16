@@ -29,6 +29,8 @@ Common env vars:
   UPI_APPROVE_STICKY=1     # approve prefers history/current egress, then rotates to next provider egress
   UPI_FOLLOW_REDIRECT=1
   UPI_REQUIRE_ZERO=1        # default: enforce 0-value; do not generate non-0 links
+  UPI_DUMP=1                # master switch: dump tay (24 diem) + HAR moi call (xem traffic_dump.py)
+  UPI_DUMP_DIR=dumps        # noi ghi dump (mien phi neu UPI_DUMP tat)
   UPI_DUMP_LIMIT=6000       # capture response save length
   UPI_PROXY_SKIP_FAILED=1   # soft-skip normally-failed proxy next time
   UPI_PROXY_REMOVE_FAILED=1 # explicit proxy failures get removed from proxy_seeds.txt
@@ -61,6 +63,8 @@ from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, quote, urlencode, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
+
+import traffic_dump
 
 try:
     from curl_cffi import CurlOpt
@@ -136,6 +140,7 @@ def execution_context(settings: Mapping[str, str], *,
         "net": {"out": 0, "in": 0, "requests": 0},
     }
     _run_context.value = context
+    _sync_dump_target(force=True)
     install_net_counters()
     try:
         check_cancelled()
@@ -211,21 +216,97 @@ def _request_with_connect_retry(original: Any, session: Any, args: tuple, kwargs
             time.sleep(delay)
 
 
+_dump_synced_label: str | None = None
+
+
+def _sync_dump_target(force: bool = False) -> None:
+    """Chốt đích dump cho task hiện tại.
+
+    Gọi ở `execution_context` (đường desk) và ở mỗi lần ghi đầu tiên (đường CLI chạy
+    `extract_cs.py` trực tiếp, không đi qua execution_context) — nếu không thì CLI và
+    process con của nó sẽ không ghi được gì.
+    """
+    global _dump_synced_label
+    label = _task_label()
+    if not force and _dump_synced_label == label:
+        return
+    traffic_dump.set_target(
+        enabled=env_bool("UPI_DUMP", False),
+        root=str(env_value("UPI_DUMP_DIR", "") or DUMP_DIR),
+        label=label,
+        body_limit=env_int("UPI_DUMP_BODY_LIMIT", 200_000, minimum=0),
+    )
+    _dump_synced_label = label
+
+
+def _record_traffic(
+    self: Any, args: tuple, kwargs: dict, response: Any = None, error: str = "",
+    started: float = 0.0,
+) -> None:
+    """Ghi 1 HAR entry cho request vừa chạy (chỉ khi UPI_DUMP=1).
+
+    Đặt ở tầng transport nên phủ MỌI call (Stripe/OpenAI/sentinel/geobilling), kèm cả header —
+    thứ mà `dump_http()` ghi tay ở 24 điểm không có. Lỗi ghi dump không bao giờ được làm hỏng
+    luồng nghiệp vụ nên toàn bộ nằm trong try/except.
+    """
+    try:
+        _sync_dump_target()
+        path = traffic_dump.entry_path()
+        if path is None:
+            return
+        # Ưu tiên `response.request` = request ĐÃ chuẩn hoá (requests/curl_cffi chèn Cookie từ
+        # cookie jar, Host, Content-Length... vào đây) — merge session+kwargs sẽ THIẾU cookie,
+        # đúng phần quan trọng nhất khi so với browser thật.
+        prepared = getattr(response, "request", None) if response is not None else None
+        if prepared is not None and getattr(prepared, "headers", None):
+            method = str(getattr(prepared, "method", "") or "GET")
+            url = str(getattr(prepared, "url", "") or "")
+            headers = dict(prepared.headers or {})
+            body = getattr(prepared, "body", None)
+        else:
+            method = str(args[0] if args else kwargs.get("method") or "GET")
+            url = str(args[1] if len(args) > 1 else kwargs.get("url") or "")
+            headers = dict(getattr(self, "headers", {}) or {})
+            headers.update(kwargs.get("headers") or {})
+            body = kwargs.get("data")
+            if body is None and kwargs.get("json") is not None:
+                body = json.dumps(kwargs["json"], ensure_ascii=False)
+        entry = traffic_dump.build_entry(
+            method=method, url=url, request_headers=headers, request_body=body,
+            status=int(getattr(response, "status_code", 0) or 0),
+            response_headers=dict(getattr(response, "headers", {}) or {}),
+            response_body=getattr(response, "text", "") if response is not None else "",
+            error=error, started=started,
+            elapsed_ms=(time.monotonic() - started) * 1000 if started else 0.0,
+            body_limit=traffic_dump.body_limit(),
+            redact=_redact_text,
+        )
+        traffic_dump.append_entry(path, entry)
+    except Exception:  # noqa: BLE001 — dump là phụ trợ, không được phá luồng
+        pass
+
+
 def _counting_request(original: Any) -> Any:
-    """Bọc `Session.request` để đếm dung lượng, KHÔNG đổi hành vi request."""
+    """Bọc `Session.request`: đếm dung lượng + ghi HAR entry (khi UPI_DUMP=1)."""
 
     @wraps(original)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         sent = (_count_request_bytes(kwargs.get("data"))
                 + _count_request_bytes(kwargs.get("json"))
                 + _count_request_bytes(kwargs.get("params")))
-        response = _request_with_connect_retry(original, self, args, kwargs)
+        started = time.monotonic()
+        try:
+            response = _request_with_connect_retry(original, self, args, kwargs)
+        except Exception as exc:  # noqa: BLE001 — ghi lại rồi ném tiếp như cũ
+            _record_traffic(self, args, kwargs, error=f"{type(exc).__name__}: {exc}", started=started)
+            raise
         try:
             head = response.headers.get("Content-Length")
             received = int(head) if head and str(head).isdigit() else len(response.content or b"")
         except Exception:  # noqa: BLE001 — đo được thì tốt, lỗi thì bỏ qua
             received = 0
         _count_net(sent, received)
+        _record_traffic(self, args, kwargs, response=response, started=started)
         return response
 
     return wrapper
@@ -4634,6 +4715,10 @@ def run_single_link_mode(
 
 
 def main() -> int:
+    # Đường CLI chạy thẳng file này (không qua `execution_context` như desk), nên phải bật
+    # bộ đếm dung lượng + recorder dump ở đây; cả hai đều idempotent.
+    install_net_counters()
+    _sync_dump_target(force=True)
     access_token, session_token = load_token()
     if not access_token:
         log("access_token is empty", "[ERROR] ")

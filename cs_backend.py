@@ -85,7 +85,8 @@ class _LineWriter(io.TextIOBase):
 
 def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
                 retry_limit: int | None, country: str,
-                stripe_telemetry: bool = False, idx: int = 0) -> dict[str, str]:
+                stripe_telemetry: bool = False,
+                dump_traffic: bool = False, idx: int = 0) -> dict[str, str]:
     """Return settings previously supplied to the child runner."""
 
     values = {
@@ -113,6 +114,10 @@ def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
         # đăng ký telemetry thành công với task thất bại trong cùng job).
         "UPI_TASK_LABEL": f"t{idx}",
     }
+    if dump_traffic:
+        # Ghi MỌI call HTTP của task (kèm header, cả phần sentinel_runner.js) vào
+        # dumps/<task>/<task>.jsonl — xem traffic_dump.py + dumps_to_har.py.
+        values["UPI_DUMP"] = "1"
     if stripe_telemetry:
         # Đăng ký phiên Stripe tại m.stripe.com -> dùng muid/guid/sid thật
         # (xem extract_cs.stripe_telemetry_ids). Đặt trong settings của execution
@@ -157,6 +162,7 @@ def run_in_process(
     country: str = "IN",
     timeout: float = 240.0,
     stripe_telemetry: bool = False,
+    dump_traffic: bool = False,
 ) -> BackendResult:
     """Run one CS flow in this interpreter.
 
@@ -185,7 +191,7 @@ def run_in_process(
                           else '{"seed": {}, "checkout": {}, "promotion": {}, "provider": {}, "pair": {}}',
                           encoding="utf-8")
     values = _env_values(token, proxy_path, state_file, promo, retry_limit, country,
-                         stripe_telemetry, idx)
+                         stripe_telemetry, dump_traffic, idx)
     writer = _LineWriter(lines, on_line)
 
     def on_result(values: dict) -> None:

@@ -97,6 +97,12 @@
         </label>
         <div class="helper" title="Asks Stripe's telemetry endpoint (via the task's proxy) for real muid/guid/sid instead of made-up ids. Experiment for the generic_decline block: run two comparable batches, one on and one off.">Real ids from m.stripe.com (off = A/B baseline)</div>
 
+        <label class="toggle" for="dump-traffic">
+          <input type="checkbox" id="dump-traffic">
+          <span>Dump all API traffic</span>
+        </label>
+        <div class="helper" title="Saves every HTTP call of each task (request + response headers and body, plus the sentinel_runner.js calls) as HAR entries under dumps/<task>/. Convert with: python3 dumps_to_har.py dumps --merge job.har, then open the .har in Chrome DevTools. Secrets (Authorization/Cookie/token) are masked.">HAR per task in dumps/</div>
+
       </div>
 
       <!-- Advanced config -->

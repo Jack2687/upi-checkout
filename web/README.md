@@ -233,6 +233,38 @@ Hai điểm khác từ docs vẫn đúng và không cần code: (1) Radar chỉ 
 (vì ta nhận `generic_decline` từ SetupIntent); (2) email/name/địa chỉ đã gửi đủ qua
 `billing_details` / `customer_data[...]`.
 
+## Dump toàn bộ API (HAR) — không phải bản ghi tay
+
+Trước đây `extract_cs.dump_http()` chỉ ghi ở **24 điểm gắn tay trong 315 chỗ gọi HTTP** và
+**không ghi header** — tức là mất đúng phần "giống browser" (UA, `sec-ch-ua`, cookie,
+`Origin`/`Referer`, `x-openai-*`), và traffic của `sentinel_runner.js` (process Node) không
+được ghi gì. Nay bật công tắc **"Dump all API traffic"** (hoặc `UPI_DUMP=1`) là ghi ở **tầng
+transport**, phủ mọi call:
+
+* `traffic_dump.py` nhận entry từ `extract_cs._counting_request` (bọc `Session.request` của cả
+  `requests` lẫn `curl_cffi`) — mọi request của luồng Python;
+* header lấy từ **request đã chuẩn hoá** (`response.request.headers`) nên có cả `cookie` do
+  cookie jar chèn vào, `authorization`, `openai-sentinel-token`, `oai-*`, `sec-ch-ua`…;
+* `sentinel_runner.js` ghi vào **cùng file** qua `UPI_DUMP_FILE` (env do
+  `traffic_dump.child_env()` truyền xuống `check_upi_eligibility._run_node`), gồm cả nhánh
+  python fallback bên trong nó.
+
+Định dạng: `dumps/<task>/<task>.jsonl`, mỗi dòng 1 **HAR 1.2 entry** (request + response, kèm
+status, header, body, `time`). Header ghi **nguyên văn** (cần đủ để so/replay với browser thật),
+body thì vẫn đi qua `_redact_text` (che Bearer/token) và bị cắt theo `UPI_DUMP_BODY_LIMIT`
+(mặc định 200.000 ký tự).
+
+Đổi sang `.har` để mở bằng Chrome DevTools/Charles:
+
+```bash
+python3 dumps_to_har.py dumps/t12                  # 1 task -> dumps/t12/t12.har
+python3 dumps_to_har.py dumps --merge job.har     # gộp cả job -> 1 file
+python3 dumps_to_har.py dumps --summary           # thống kê theo host/status, không ghi file
+```
+
+**Cảnh báo:** vì header không bị che nên file dump chứa **access token thật**. `dumps/` đã nằm
+trong `.gitignore` — đừng commit, đừng copy ra ngoài repo.
+
 ## Lỗi `400 Billing country must match request country`
 
 OpenAI từ chối tạo checkout vì "nước billing phải khớp nước của request" (dù proxy exit là IN

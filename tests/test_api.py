@@ -54,7 +54,7 @@ class ApiRequestTests(unittest.TestCase):
                                      filter_proxies=False, stripe_telemetry=True)
             self.assertEqual(web_app.api_run(req), {"job_id": job.job_id, "total": 2})
         start.assert_called_once_with(["one", "two"], "cs", "IN", "off", 16,
-                                      "offline proxy fixture", 1, True, False, True)
+                                      "offline proxy fixture", 1, True, False, True, False)
 
     def test_run_defaults_to_no_telemetry_experiment(self):
         job = SimpleNamespace(job_id="abcdef123456", total=1)
@@ -66,8 +66,8 @@ class ApiRequestTests(unittest.TestCase):
         job = SimpleNamespace(job_id="abcdef123456", total=1)
         with patch.object(engine, "start_job", return_value=job) as start:
             web_app.api_run(web_app.RunRequest(tokens="one"))
-        # hai cờ cuối: filter_proxies (mặc định BẬT) và stripe_telemetry (mặc định TẮT)
-        self.assertEqual(start.call_args.args[-2:], (True, False))
+        # ba cờ cuối: filter_proxies (mặc định BẬT), stripe_telemetry và dump_traffic (TẮT)
+        self.assertEqual(start.call_args.args[-3:], (True, False, False))
 
     def test_invalid_run_never_reaches_engine(self):
         with patch.object(engine, "start_job") as start:

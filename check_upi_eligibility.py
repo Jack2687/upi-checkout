@@ -30,6 +30,8 @@ import upi_core as core
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PROXY_FILE = ROOT / "proxy_seeds_in_bestgo.txt"
 CHECKOUT_URL = "https://chatgpt.com/backend-api/payments/checkout"
+import traffic_dump
+
 SENTINEL_RUNNER = ROOT / "sentinel_runner.js"
 SENTINEL_SDK_URL = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 SENTINEL_UA = (
@@ -208,6 +210,9 @@ def _run_node(request: dict, timeout: int) -> dict:
             [node, str(SENTINEL_RUNNER)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
+            # Node khong thay settings cua job (chung nam trong run context, khong phai
+            # os.environ), nen phai truyen dich dump sang de sentinel ghi cung file.
+            env={**os.environ, **traffic_dump.child_env()},
         )
     except OSError:
         return {}

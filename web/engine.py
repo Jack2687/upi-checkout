@@ -223,7 +223,8 @@ class Task:
 class Job:
     def __init__(self, job_id: str, mode: str, tokens: list[str], country: str,
                  promo: str, workers: int, proxy_source: str, retries: int = 1,
-                 filter_proxies: bool = True, stripe_telemetry: bool = False) -> None:
+                 filter_proxies: bool = True, stripe_telemetry: bool = False,
+                 dump_traffic: bool = False) -> None:
         self.job_id = job_id
         self.mode = mode
         self.country = country
@@ -237,6 +238,9 @@ class Job:
         # True = đăng ký phiên Stripe tại m.stripe.com rồi dùng muid/guid/sid thật
         # (thử nghiệm giảm generic_decline; xem extract_cs.stripe_telemetry_ids).
         self.stripe_telemetry = stripe_telemetry
+        # True = ghi MỌI call HTTP (request+response, kèm header) của task vào
+        # dumps/<task>/<task>.jsonl dạng HAR entry; xem traffic_dump.py.
+        self.dump_traffic = dump_traffic
         self.total = len(tokens)
         self.tasks: dict[str, Task] = {}
         self.order: list[str] = []
@@ -1712,6 +1716,7 @@ def _backend_request(job: Job, task: Task, proxy: str, seed: Path) -> backend.Ba
         token=task.token, proxy=proxy, seed_file=seed, state_dir=job.state_dir,
         index=task.index, country=job.country, promo=job.promo,
         retry_limit=job.retries, stripe_telemetry=job.stripe_telemetry,
+        dump_traffic=job.dump_traffic,
     )
 
 
@@ -1900,7 +1905,8 @@ def _enqueue_tasks(job: Job, tasks: list[Task]) -> None:
 # ---------------------------------------------------------------- public API
 def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: int,
               proxies: str | None, retries: int = 1, mix: bool = False,
-              filter_proxies: bool = True, stripe_telemetry: bool = False) -> Job:
+              filter_proxies: bool = True, stripe_telemetry: bool = False,
+              dump_traffic: bool = False) -> Job:
     tokens = [t.strip() for t in tokens if t.strip()]
     if not tokens:
         raise ValueError("no tokens")
@@ -1918,7 +1924,7 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
     proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens), mix,
                                                       filter_proxies)
     job = Job(job_id, mode, tokens, country, promo, workers, label, retries,
-              filter_proxies, stripe_telemetry)
+              filter_proxies, stripe_telemetry, dump_traffic)
     job._proxy_file, job._proxies = proxy_file, px
 
     with _JOBS_LOCK:
