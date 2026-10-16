@@ -203,6 +203,36 @@ Nên giờ mặc định **bỏ luôn checkout/update** khi `amount` khác 0 và
 `promo_not_eligible` (đỡ 1 request checkout/update + 1 lần `stripe_init` ≈ 10–20s mỗi task,
 trên batch 7k là ~7–9 giờ-worker). Bật lại để thử bằng `UPI_TRY_PROMO_UPDATE=1`.
 
+## Radar Session — bù tín hiệu thiết bị mà tích hợp Direct API bị thiếu
+
+Đọc docs Stripe ([radar/optimize-risk-factors](https://docs.stripe.com/radar/optimize-risk-factors),
+[radar/radar-session](https://docs.stripe.com/radar/radar-session)): với tích hợp gọi API trực
+tiếp (không dùng Checkout/Elements của Stripe) thì Stripe **không tự thu tín hiệu thiết bị**,
+và họ xếp hạng mức đóng góp của từng nhóm tín hiệu:
+
+| Tín hiệu | Ước tính cải thiện model | Luồng này |
+|---|---|---|
+| **Advanced risk factors** (thiết bị/phiên — qua **Radar Session**) | **36%** | ❌ trước đây không gửi gì |
+| IP address | 12% | ✅ (IP của kết nối) |
+| Customer email | 11% | ✅ `billing_details[email]` |
+| Customer name | 3% | ✅ |
+| Billing address | 1% | ✅ |
+
+Vì vậy giờ có `extract_cs.stripe_radar_session()`: lấy id thật từ `m.stripe.com/6`, gọi
+`POST https://api.stripe.com/v1/radar/session` để lấy `rse_…`, rồi đính
+**`radar_options[session]`** vào lúc tạo UPI PaymentMethod — theo docs đó là chỗ bắt buộc để
+Radar Session có tác dụng với thanh toán định kỳ (off-session).
+
+Bật/tắt cùng công tắc **"Register Stripe session (m.stripe.com)"** (env
+`UPI_STRIPE_TELEMETRY=1`); không tạo được session thì log WARN và luồng chạy như cũ. Cố ý
+**không** đính `radar_options` vào `payment_pages/{cs}/confirm` vì endpoint đó trả
+`parameter_unknown` với tham số lạ.
+
+Hai điểm khác từ docs cần biết: (1) Radar chỉ quét SetupIntent khi bật
+*"Use Radar on payment methods saved for future use"* trong Radar settings — với luồng này
+nó đang BẬT (vì ta nhận `generic_decline` từ SetupIntent); (2) docs khuyến nghị dùng
+Customer object + email/name/địa chỉ — luồng này đã gửi đủ qua `customer_data[...]`.
+
 ## Lỗi `400 Billing country must match request country`
 
 OpenAI từ chối tạo checkout vì "nước billing phải khớp nước của request" (dù proxy exit là IN

@@ -768,6 +768,53 @@ def stripe_browser_id() -> str:
     return f"{uuid.uuid4()}{uuid.uuid4().hex[:8]}"
 
 
+def stripe_radar_session(stripe: Any, stripe_pk: str) -> str:
+    """Tạo **Radar Session** (`rse_...`) để gửi kèm `radar_options[session]`.
+
+    Vì sao: theo docs Stripe (radar/optimize-risk-factors), với tích hợp "Direct API" thì
+    **advanced risk factors** (đặc điểm thiết bị/phiên) là nhóm tín hiệu ĐÁNG GIÁ NHẤT —
+    ước tính **+36%** cho model chống gian lận — trong khi email/name/địa chỉ chỉ ~15% và
+    mình đã gửi đủ. Khi tự tokenize (không dùng Elements/Checkout của Stripe) thì các tín
+    hiệu này không được thu tự động, nên phải tạo Radar Session thủ công rồi đính vào
+    PaymentMethod/confirm (`radar_options[session]`).
+
+    Chỉ chạy khi `UPI_STRIPE_TELEMETRY=1` (cùng công tắc với telemetry id) — bật để A/B.
+    Trả "" nếu không tạo được; luồng vẫn chạy như cũ.
+    """
+    if not env_bool("UPI_STRIPE_TELEMETRY", False):
+        return ""
+    cached = ""
+    context = getattr(_run_context, "value", None)
+    if context is not None:
+        cached = str(context.get("radar_session") or "")
+    if cached:
+        return cached
+    try:
+        ids = stripe_telemetry_ids()
+        body = {
+            "key": stripe_pk,
+            "muid": ids.get("muid", ""),
+            "sid": ids.get("sid", ""),
+            "guid": ids.get("guid", ""),
+            "client_attribution_metadata[client_session_id]": str(uuid.uuid4()),
+        }
+        resp = stripe.post("https://api.stripe.com/v1/radar/session", data=body,
+                           headers={"Origin": "https://js.stripe.com",
+                                    "Referer": "https://js.stripe.com/"},
+                           timeout=DEFAULT_TIMEOUT)
+        session = str((resp.json() or {}).get("id") or "") if resp.status_code < 400 else ""
+        if not session:
+            log(f"radar session: không tạo được (HTTP {resp.status_code}: {resp.text[:90]})", "[WARN] ")
+            return ""
+        log(f"radar session: đã tạo {session[:14]}… (gửi kèm radar_options[session])")
+    except Exception as exc:  # noqa: BLE001 — không tạo được thì chạy như cũ
+        log(f"radar session: bỏ qua ({type(exc).__name__}: {str(exc)[:80]})", "[WARN] ")
+        return ""
+    if context is not None:
+        context["radar_session"] = session
+    return session
+
+
 def _task_label() -> str:
     """Nhãn task trong log flow (cs_backend đặt UPI_TASK_LABEL=t<idx>)."""
     return str(env_value("UPI_TASK_LABEL", "") or "-")
@@ -2665,6 +2712,11 @@ def stripe_create_upi_pm(stripe: requests.Session, cs_id: str, stripe_pk: str, b
         "client_attribution_metadata[checkout_session_id]": cs_id,
         "key": stripe_pk,
     }
+    radar = stripe_radar_session(stripe, stripe_pk)
+    if radar:
+        # PM là nơi Stripe lưu tín hiệu thiết bị cho MỌI lần dùng sau (off-session) — theo
+        # docs đây là chỗ bắt buộc để Radar Session có tác dụng với mandate định kỳ.
+        body["radar_options[session]"] = radar
     if should_send_vpa(billing):
         body["upi[vpa]"] = billing.get("vpa") or ""
     if billing.get("state"):
