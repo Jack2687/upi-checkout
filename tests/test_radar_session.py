@@ -27,6 +27,7 @@ class FakeResp:
 class RadarSessionTests(unittest.TestCase):
     def setUp(self):
         ex._log_file = Path(__import__("tempfile").mkdtemp(prefix="upi-test-")) / "flow.log"
+        ex.RADAR_OPTIONS_SUPPORTED = None
 
     def test_off_by_default_does_not_call_stripe(self):
         with patch.object(ex, "env_bool", lambda n, d=False: False), \
@@ -95,6 +96,40 @@ class RadarSessionTests(unittest.TestCase):
             ex.stripe_create_upi_pm(Stripe(), "cs_1", "pk", billing, {})
         self.assertNotIn("radar_options[session]", sent["body"])
 
+    def test_rejected_radar_options_is_retried_without_it(self):
+        """Đo thật: Stripe trả 400 `Received unknown parameter: radar_options` -> gửi lại ngay,
+        task không được chết vì tham số phụ này (lần trước nó giết 89/100 task)."""
+        bodies = []
+
+        class Stripe:
+            def post(self, url, data=None, **kw):
+                bodies.append(dict(data or {}))
+                if "radar_options[session]" in data:
+                    return FakeResp({"error": {"code": "parameter_unknown",
+                                               "message": "Received unknown parameter: radar_options"}},
+                                    status=400)
+                return FakeResp({"id": "pm_ok"})
+
+        billing = {"name": "A B", "email": "a@b.c", "country": "IN", "line1": "1 X",
+                   "city": "Patna", "postal_code": "800027"}
+        with patch.object(ex, "stripe_radar_session", return_value="rse_abc"), \
+             patch.object(ex, "dump_http", lambda *a, **k: None):
+            pm = ex.stripe_create_upi_pm(Stripe(), "cs_1", "pk", billing, {})
+        self.assertEqual(pm, "pm_ok")
+        self.assertEqual(len(bodies), 2)
+        self.assertIn("radar_options[session]", bodies[0])
+        self.assertNotIn("radar_options[session]", bodies[1])
+        self.assertIs(ex.RADAR_OPTIONS_SUPPORTED, False)
+
+    def test_stops_creating_sessions_once_rejected(self):
+        class Stripe:
+            def post(self, url, data=None, **kw):
+                raise AssertionError("must not call Stripe")
+
+        ex.RADAR_OPTIONS_SUPPORTED = False
+        with patch.object(ex, "env_bool", lambda n, d=False: True), ex.execution_context({}):
+            self.assertEqual(ex.stripe_radar_session(Stripe(), "pk"), "")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -105,6 +140,7 @@ class RadarSessionVariantTests(unittest.TestCase):
 
     def setUp(self):
         ex._log_file = Path(__import__("tempfile").mkdtemp(prefix="upi-test-")) / "flow.log"
+        ex.RADAR_OPTIONS_SUPPORTED = None
 
     def test_falls_through_variants_until_one_works(self):
         seen = []

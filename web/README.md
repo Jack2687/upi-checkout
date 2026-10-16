@@ -228,6 +228,18 @@ Bật/tắt cùng công tắc **"Register Stripe session (m.stripe.com)"** (env
 **không** đính `radar_options` vào `payment_pages/{cs}/confirm` vì endpoint đó trả
 `parameter_unknown` với tham số lạ.
 
+**Số đo trên job thật (16/10, 100 acc)** — hai nửa của tính năng này tách hẳn nhau:
+
+* `/v1/radar/session`: dạng đầu tiên `key + muid + sid + guid` tạo được `rse_…` **ngay**
+  (89/89 lần), không dạng nào bị từ chối ⇒ 3 dạng sau chỉ còn để phòng khi Stripe đổi.
+* `radar_options[session]` khi tạo PaymentMethod: Stripe trả
+  `400 parameter_unknown — Received unknown parameter: radar_options` ⇒ API version của tài
+  khoản này **không nhận** tham số đó, và nó từng làm chết **89/100 task** (mọi task đi tới
+  bước tạo PM). Nên `stripe_create_upi_pm()` giờ **tự hạ cấp**: gặp lỗi này thì log 1 dòng
+  WARN, bỏ tham số, gửi lại chính request đó ngay (task không chết), rồi đặt cờ
+  `extract_cs.RADAR_OPTIONS_SUPPORTED = False` để cả process thôi tạo Radar Session và thôi
+  đính `radar_options` — mỗi lần chạy chỉ mất đúng 1 request để "học" điều này.
+
 Hai điểm khác từ docs cần biết: (1) Radar chỉ quét SetupIntent khi bật
 *"Use Radar on payment methods saved for future use"* trong Radar settings — với luồng này
 nó đang BẬT (vì ta nhận `generic_decline` từ SetupIntent); (2) docs khuyến nghị dùng
