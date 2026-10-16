@@ -355,6 +355,16 @@ function effStatus(t, p) {
   return p.status || '';
 }
 
+// "vừa xong" / "4m" / "2h" — tuổi lần dò link gần nhất.
+function linkCheckedAge(ts) {
+  if (!ts) return '';
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (secs < 60) return 'vừa xong';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h';
+  return Math.floor(secs / 86400) + 'd';
+}
+
 function chipFor(t) {
   if (t.status === 'running') return ['Running', 'chip-blue'];
   if (t.status === 'stopped') return ['Stopped', 'chip-gray'];
@@ -407,8 +417,18 @@ function setChip(t) {
   // chip hàng nên chỉ hiện ở chế độ lưới (CSS ẩn ở danh sách).
   if (t.el.footState) {
     const [stateLabel, stateCls] = CHIP_STATE[t.linkState || ''] || ['Link created', cls];
-    t.el.footState.textContent = stateLabel;
+    // Kèm tuổi lần dò gần nhất: uỷ nhiệm ₹0 có thể được khách duyệt muộn, chip "Awaiting
+    // payment" không đổi không có nghĩa là kẹt — nhưng phải thấy nó vẫn đang được dò.
+    const age = linkCheckedAge(t.linkCheckedAt);
+    t.el.footState.textContent = age ? stateLabel + ' · ' + age : stateLabel;
     t.el.footState.className = 'chip success-chip-state ' + stateCls;
+    // Chip chỉ đổi khi TRẠNG THÁI đổi; thêm mốc "vừa dò" để biết server còn theo dõi link
+    // (uỷ nhiệm ₹0 có thể được khách duyệt muộn, không phải kẹt).
+    if (t.el.footState.parentElement) {
+      t.el.footState.parentElement.title = t.linkCheckedAt
+        ? 'link checked ' + new Date(t.linkCheckedAt * 1000).toLocaleString()
+        : 'link chưa được dò lần nào';
+    }
   }
 }
 
@@ -1995,6 +2015,7 @@ function handleEvent(evt) {
     case 'task_billing': onBilling(evt); break;
     case 'task_artifact': onArtifact(evt); break;
     case 'task_link': onTaskLink(evt); break;
+  case 'task_link_checked': onTaskLinkChecked(evt); break;
     case 'task_plus': onTaskPlus(evt); break;
     case 'task_done': onTaskDone(evt); break;
     case 'job_done': onJobDone(evt); break;
@@ -2139,6 +2160,15 @@ function onProxyQuality(evt) {
 // Server dò link ở NỀN và đẩy xuống đây mỗi khi trạng thái đổi (khách quét được /
 // link chết). Nhờ vậy không cần browser tự setInterval 20s nữa — đóng tab vẫn có
 // người theo dõi, và mở lại là thấy kết quả mới nhất.
+// Server vừa dò lại link nhưng trạng thái KHÔNG đổi -> chỉ cập nhật mốc thời gian, để chip
+// "Awaiting payment" không còn cảm giác đứng im (người dùng thấy nó vẫn đang được theo dõi).
+function onTaskLinkChecked(evt) {
+  const live = tasks.get(evt.task_id);
+  if (!live) return;
+  live.linkCheckedAt = evt.link_checked_at || 0;
+  queueTaskRender(live, true);
+}
+
 function onTaskLink(evt) {
   const live = tasks.get(evt.task_id);
   if (!live) return;
@@ -2355,6 +2385,7 @@ function applySnapshot(data) {
     t.linkState = td.link_state || '';
     t.linkZero = !!td.link_zero;
     t.linkFlipAt = td.link_flip_at || 0;
+    t.linkCheckedAt = td.link_checked_at || 0;
     t.linkNote = td.link_note || '';
     // Kết luận Plus cũng phải đọc từ snapshot: chỉ nhận qua event `task_plus` thì
     // F5 xong badge biến mất, mà khi đã dò xong (plus/not_plus) thì không còn event

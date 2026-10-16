@@ -280,6 +280,30 @@ python3 dumps_to_har.py dumps --summary           # thống kê theo host/status
 **Cảnh báo:** vì header không bị che nên file dump chứa **access token thật**. `dumps/` đã nằm
 trong `.gitignore` — đừng commit, đừng copy ra ngoài repo.
 
+## Vòng dò link: "Awaiting payment" không được đứng im
+
+Chip "Awaiting payment" = trang instructions trả `intent_state=requires_action`, tức uỷ nhiệm
+₹0 đã tạo nhưng khách **chưa quét/duyệt trong app UPI**. Đó là trạng thái đúng — vấn đề là
+trước đây nó bị **đóng băng**:
+
+* `MONITOR_MAX_IDLE_MIN = 30`: job xong quá 30 phút thì vòng dò nền **thôi không kiểm tra**
+  link nữa. Đo trên job `3dcd91d4f58a`: 7 link, lần dò cuối cách đó **32–42 phút**, 2 link
+  `waiting` sẽ không bao giờ đổi trạng thái nữa dù khách duyệt muộn hay uỷ nhiệm hết hạn.
+* Khi trạng thái không đổi thì `_monitor_one` **không emit gì**, nên UI cũng không biết link
+  còn được theo dõi hay không.
+
+Nay:
+
+| | Trước | Sau |
+|---|---|---|
+| Thời gian theo dõi | 30 phút sau khi job xong | **24 giờ** (`UPI_MONITOR_MAX_IDLE_MIN`, mặc định 1440) |
+| Nhịp dò | 30s | 30s khi job còn nóng (≤ 5 phút sau khi xong), sau đó **5 phút/lần** (`UPI_MONITOR_COLD_SECS`) |
+| Trạng thái không đổi | không báo gì | emit `task_link_checked` → chip hiện thêm tuổi lần dò: **“Awaiting payment · 4m”** |
+| Hết hạn | chỉ khi trang trả `expires_at` đã qua | giữ nguyên, nhưng giờ vòng dò còn chạy nên bắt được |
+
+Vì mỗi job chỉ có vài link sống (7 link / 5.859 acc trong job đo được), chi phí theo dõi 24h
+là không đáng kể, và mọi request dò đều đi qua proxy của chính task đó.
+
 ## Rà soát rò IP thật (leak) — mọi request ra ngoài phải qua proxy
 
 Dump toàn bộ API (mục trên) cho phép soi lại từng request, và phát hiện các chỗ **gọi thẳng

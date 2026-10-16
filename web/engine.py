@@ -474,22 +474,43 @@ def get_job(job_id: str) -> Job | None:
 LINK_TERMINAL = ("succeeded", "failed", "canceled", "expired")
 MONITOR_SECS = float(os.environ.get("UPI_MONITOR_SECS", "30") or 30)
 MONITOR_CONC = int(os.environ.get("UPI_MONITOR_CONC", "8") or 8)
-MONITOR_MAX_IDLE_MIN = 30.0     # job xong lâu hơn mức này thì thôi không dò nữa
+# Job xong thì KHÔNG ngừng dò ngay: uỷ nhiệm ₹0 có thể được khách duyệt muộn (nhiều giờ sau),
+# và nếu thôi dò thì chip "Awaiting payment" đứng im mãi — không ai biết là khách đã quét hay
+# uỷ nhiệm đã hết hạn. Nên: dò dày lúc job còn nóng, dò thưa (mặc định 5 phút/lần) sau đó, và
+# chỉ bỏ hẳn sau UPI_MONITOR_MAX_IDLE_MIN phút (mặc định 24 giờ).
+MONITOR_HOT_IDLE_MIN = float(os.environ.get("UPI_MONITOR_HOT_IDLE_MIN", "5") or 5)
+MONITOR_COLD_SECS = float(os.environ.get("UPI_MONITOR_COLD_SECS", "300") or 300)
+MONITOR_MAX_IDLE_MIN = float(os.environ.get("UPI_MONITOR_MAX_IDLE_MIN", "1440") or 1440)
 
-def _link_monitor_targets() -> list[tuple[Job, Task]]:
-    """Task cần dò: có link QR, chưa ở trạng thái cuối, job còn 'nóng'."""
-    cutoff = time.time() - MONITOR_MAX_IDLE_MIN * 60
-    out: list[tuple[Job, Task]] = []
+
+def _job_idle_minutes(job: Job, now: float) -> float:
+    """Số phút kể từ lúc job xong (0 nếu còn đang chạy)."""
+    if not job.finished_at:
+        return 0.0
+    try:
+        end = time.mktime(time.strptime(job.finished_at, "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return 0.0
+    return max(0.0, (now - end) / 60.0)
+
+
+def _link_monitor_targets() -> tuple[list[tuple[Job, Task]], list[tuple[Job, Task]]]:
+    """Task cần dò, chia 2 nhóm: `(hot, cold)`.
+
+    hot = job còn chạy hoặc vừa xong (dò mỗi MONITOR_SECS)
+    cold = job đã xong lâu hơn MONITOR_HOT_IDLE_MIN (dò mỗi MONITOR_COLD_SECS cho tới
+           MONITOR_MAX_IDLE_MIN phút)
+    """
+    now = time.time()
+    hot: list[tuple[Job, Task]] = []
+    cold: list[tuple[Job, Task]] = []
     with _JOBS_LOCK:
         jobs = list(_JOBS.values())
     for job in jobs:
-        if job.finished_at:
-            try:
-                end = time.mktime(time.strptime(job.finished_at, "%Y-%m-%d %H:%M:%S"))
-            except ValueError:
-                end = time.time()
-            if end < cutoff:
-                continue
+        idle = _job_idle_minutes(job, now)
+        if idle > MONITOR_MAX_IDLE_MIN:
+            continue
+        bucket = hot if idle <= MONITOR_HOT_IDLE_MIN else cold
         with job._lock:
             tasks = list(job.tasks.values())
         for task in tasks:
@@ -498,8 +519,8 @@ def _link_monitor_targets() -> list[tuple[Job, Task]]:
                 continue
             if task.link_state in LINK_TERMINAL:
                 continue
-            out.append((job, task))
-    return out
+            bucket.append((job, task))
+    return hot, cold
 
 
 def _monitor_one(job: Job, task: Task) -> None:
@@ -526,6 +547,10 @@ def _monitor_one(job: Job, task: Task) -> None:
     task.link_zero = zero
     task.link_note = note
     if new_state == old:
+        # Trạng thái không đổi vẫn phải báo mốc vừa dò, để UI hiện "checked Xm ago" thay vì
+        # một chip "Awaiting payment" đứng im mà không biết còn được theo dõi hay không.
+        job.emit({"type": "task_link_checked", "task_id": task.task_id,
+                  "link_checked_at": now})
         return
 
     task.link_state = new_state
@@ -618,12 +643,18 @@ def _plus_check_loop(job: Job, task: Task, token: str, proxy: str) -> None:
 
 
 def _link_monitor_loop() -> None:
+    last_cold = 0.0
     while True:
         try:
             time.sleep(MONITOR_SECS)
-            targets = _link_monitor_targets()
+            hot, cold = _link_monitor_targets()
+            now = time.time()
+            due_cold = bool(cold) and (now - last_cold) >= MONITOR_COLD_SECS
+            targets = hot + (cold if due_cold else [])
             if not targets:
                 continue
+            if due_cold:
+                last_cold = now
             with ThreadPoolExecutor(max_workers=max(1, MONITOR_CONC)) as ex:
                 list(ex.map(lambda jt: _monitor_one(*jt), targets))
         except Exception as exc:  # noqa: BLE001 — vòng nền không được chết
