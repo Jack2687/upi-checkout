@@ -3743,6 +3743,19 @@ def run_provider_flow(
     if amount == 0:
         log("checkout already 0 after create_checkout; skipping Apply promotion (checkout/update)")
         record_checkout_zero_result(checkout_proxy, checkout_country, amount)
+    # Đo trên job 7.302 task: khi `amount` ĐÃ khác 0 ngay sau create_checkout thì bước
+    # checkout/update (Apply promotion) gần như vô ích — chỉ 1/1.687 lần kéo được về 0
+    # (0,06%), còn lại đều kết thúc bằng promo_not_eligible. Mỗi lần thử tốn thêm 1 request
+    # checkout/update + 1 lần stripe_init (~10-20s), nên mặc định BỎ QUA và báo không đủ
+    # điều kiện luôn; bật lại bằng UPI_TRY_PROMO_UPDATE=1 nếu muốn thử.
+    if amount != 0 and not env_bool("UPI_TRY_PROMO_UPDATE", False):
+        log("amount non-zero right after create_checkout — skipping Apply promotion "
+            "(checkout/update) and failing fast as not eligible "
+            "(UPI_TRY_PROMO_UPDATE=1 to try anyway)", "[WARN] ")
+        raise RuntimeError(
+            f"promo_not_eligible: 0-value promo did not apply at create_checkout "
+            f"(minor amount={amount}); account not eligible, skipping "
+            f"{amount / 100:.0f} chain")
     for promotion_index, promotion_country in enumerate(
             UPI_PROMOTION_COUNTRIES if amount != 0 else (), start=1):
         current_promotion_proxy = proxy_for_country(promotion_proxy, promotion_country)

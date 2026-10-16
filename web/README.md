@@ -190,6 +190,19 @@ Lưu ý: TLS fingerprint **đã** là Chrome thật (`curl_cffi` + `impersonate=
 `new_session`), nên hướng "đổi JA3" không cần làm nữa; đòn còn lại là telemetry id, uy tín
 account, và (đắt nhất) chạy payment element bằng browser thật.
 
+## Skip Apply promotion khi account không đủ điều kiện
+
+Đo trên job 7.302 task (`380a86aad3a0`):
+
+| Trường hợp ngay sau `create_checkout` | Số task | Xử lý |
+|---|---|---|
+| `amount` đã = 0 | 789 | **đã skip** checkout/update từ trước (`checkout already 0 after create_checkout; skipping Apply promotion`) |
+| `amount` khác 0 | 1.687 | trước đây vẫn gọi checkout/update — nhưng chỉ **1/1.687 (0,06%)** kéo được về 0 |
+
+Nên giờ mặc định **bỏ luôn checkout/update** khi `amount` khác 0 và fail nhanh với
+`promo_not_eligible` (đỡ 1 request checkout/update + 1 lần `stripe_init` ≈ 10–20s mỗi task,
+trên batch 7k là ~7–9 giờ-worker). Bật lại để thử bằng `UPI_TRY_PROMO_UPDATE=1`.
+
 ## Lỗi `400 Billing country must match request country`
 
 OpenAI từ chối tạo checkout vì "nước billing phải khớp nước của request" (dù proxy exit là IN
