@@ -61,10 +61,10 @@
 
       <div class="section execution-settings">
         <div class="field worker-field">
-          <label class="section-label" for="workers">Worker song song</label>
+          <label class="section-label" for="workers">Workers</label>
           <input id="workers" type="number" value="4" min="1" max="300" aria-describedby="workers-help">
         </div>
-        <div class="helper" id="workers-help">1–300 workers. Each in-flight worker costs ~26 MB RAM (measured: 200 workers ≈ 5 GB). Raise gradually; the pool should have at least as many proxies as workers.</div>
+        <div class="helper" id="workers-help">1–300 · ~26 MB RAM each (200 ≈ 5 GB)</div>
       </div>
 
       <!-- Proxy pool -->
@@ -73,10 +73,10 @@
           <input type="checkbox" id="use-proxy">
           <span>Use custom proxy pool</span>
         </label>
-        <div class="helper">Defaults to upi-checkout/proxy.txt. Enable to paste your own pool.</div>
+        <div class="helper">Defaults to proxy.txt</div>
         <textarea id="proxies" class="proxies-input mono" rows="4" placeholder="http://user:pass@host:port" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Custom proxy list" hidden></textarea>
         <div class="pool-status" id="pool-status" hidden>
-          <span id="pool-count">0 proxy</span>
+          <span id="pool-count">0 proxies</span>
           <span class="pool-actions">
             <button type="button" class="btn-mini" id="pool-clear">Clear pool</button>
           </span>
@@ -85,17 +85,17 @@
           <input type="checkbox" id="mix-proxy" checked>
           <span>Mix pool order</span>
         </label>
-        <div class="helper">Shuffles the pool once per job (fresh random order each run), so accounts draw from different region groups instead of the pool being handed out block by block. Untick to keep the pasted order.</div>
+        <div class="helper" title="Shuffles the pool once per job so accounts draw from different region groups instead of taking the pool block by block. Untick to keep the pasted order.">Shuffles the pool each run</div>
         <label class="checkbox-row">
           <input type="checkbox" id="filter-proxy" checked>
           <span>Proxy quality filter</span>
         </label>
-        <div class="helper">Tick (default): each worker probes its proxy first and drops unreachable / wrong-country / tor ones, then tries the next, generating a new session if the pool runs out. Untick to use the pool exactly as pasted — no probing, no dropping, no replacement — to compare runs with and without the filter.</div>
+        <div class="helper" title="Each worker probes its proxy and drops unreachable / wrong-country / tor ones, then tries the next and generates a new session if the pool runs out. Untick to use the pool exactly as pasted — no probing, no dropping, no replacement — to compare runs.">Drops dead / wrong-country proxies</div>
         <label class="checkbox-row">
           <input type="checkbox" id="stripe-telemetry">
           <span>Register Stripe session (m.stripe.com)</span>
         </label>
-        <div class="helper">Off by default. When on, each run asks Stripe's own telemetry endpoint for real <code>muid/guid/sid</code> (via the task's proxy) instead of made-up ids. Experiment for the <code>generic_decline</code> block — run two comparable batches, one with it on and one off, and compare decline rates.</div>
+        <div class="helper" title="Asks Stripe's telemetry endpoint (via the task's proxy) for real muid/guid/sid and attaches a Radar session, instead of made-up ids. Experiment for the generic_decline block: run two comparable batches, one on and one off.">Real ids + Radar session (off = A/B baseline)</div>
 
       </div>
 
@@ -113,12 +113,12 @@
               <option value="off" selected>Off — full price</option>
               <option value="campaign">plus-1-month-free</option>
             </select>
-            <span class="helper">Only applies to eligible accounts. Check the final amount in the results.</span>
+            <span class="helper" title="Only applies to eligible accounts — check the final amount in the results.">Eligible accounts only</span>
           </div>
           <div class="field">
             <label for="retries">Max runs per account</label>
             <input id="retries" type="number" value="3" min="1" max="5">
-            <span class="helper">3 = run the account up to 3 times, then stop (never a 4th). Extra runs reuse the same account with a new device_id + proxy session, run sequentially.</span>
+            <span class="helper" title="3 = run the account up to 3 times, then stop (never a 4th). Extra runs reuse the same account with a new device_id + proxy session, and run sequentially.">Total attempts per account</span>
           </div>
         </div>
       </details>

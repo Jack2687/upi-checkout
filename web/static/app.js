@@ -2706,7 +2706,7 @@ function loadForm() {
 function updatePoolStatus() {
   const n = els.proxies.value.split('\n').map(s => s.trim()).filter(Boolean).length;
   els.poolStatus.hidden = !(els.useProxy.checked && n > 0);
-  els.poolCount.textContent = n + ' proxy trong pool';
+  els.poolCount.textContent = n + ' proxies';
 }
 
 /* ----------------------------- init -------------------------------- */
