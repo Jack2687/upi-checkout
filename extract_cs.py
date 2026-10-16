@@ -31,6 +31,7 @@ Common env vars:
   UPI_REQUIRE_ZERO=1        # default: enforce 0-value; do not generate non-0 links
   UPI_DUMP=1                # master switch: dump tay (24 diem) + HAR moi call (xem traffic_dump.py)
   UPI_DUMP_DIR=dumps        # noi ghi dump (mien phi neu UPI_DUMP tat)
+  UPI_DUMP_RAW_BODY=1       # body cung ghi nguyen van (mac dinh: che Bearer/token trong body)
   UPI_DUMP_LIMIT=6000       # capture response save length
   UPI_PROXY_SKIP_FAILED=1   # soft-skip normally-failed proxy next time
   UPI_PROXY_REMOVE_FAILED=1 # explicit proxy failures get removed from proxy_seeds.txt
@@ -234,7 +235,8 @@ def _sync_dump_target(force: bool = False) -> None:
         enabled=env_bool("UPI_DUMP", False),
         root=str(env_value("UPI_DUMP_DIR", "") or DUMP_DIR),
         label=label,
-        body_limit=env_int("UPI_DUMP_BODY_LIMIT", 200_000, minimum=0),
+        # 0 = KHONG cat body (dump day du); dat UPI_DUMP_BODY_LIMIT neu can chan dung luong.
+        body_limit=env_int("UPI_DUMP_BODY_LIMIT", 0, minimum=0),
     )
     _dump_synced_label = label
 
@@ -271,16 +273,33 @@ def _record_traffic(
             body = kwargs.get("data")
             if body is None and kwargs.get("json") is not None:
                 body = json.dumps(kwargs["json"], ensure_ascii=False)
+        elapsed_ms = (time.monotonic() - started) * 1000 if started else 0.0
         entry = traffic_dump.build_entry(
             method=method, url=url, request_headers=headers, request_body=body,
             status=int(getattr(response, "status_code", 0) or 0),
             response_headers=dict(getattr(response, "headers", {}) or {}),
             response_body=getattr(response, "text", "") if response is not None else "",
-            error=error, started=started,
-            elapsed_ms=(time.monotonic() - started) * 1000 if started else 0.0,
+            error=error, started=started, elapsed_ms=elapsed_ms,
             body_limit=traffic_dump.body_limit(),
-            redact=_redact_text,
+            # Body cung nguyen van khi UPI_DUMP_RAW_BODY=1 (can de replay y nguyen request).
+            redact=None if env_bool("UPI_DUMP_RAW_BODY", False) else _redact_text,
+            # Cookie jar CO CA thuoc tinh (path/domain/expires/secure), khong chi header tho.
+            request_cookie_jar=getattr(self, "cookies", None),
+            response_cookie_jar=getattr(response, "cookies", None) if response is not None else None,
+            # Chuoi redirect thuc te + thoi gian server bao (requests/curl_cffi deu co .elapsed).
+            redirects=[
+                {"status": int(getattr(hop, "status_code", 0) or 0),
+                 "url": str(getattr(hop, "url", "") or ""),
+                 "location": str((getattr(hop, "headers", {}) or {}).get("Location") or "")}
+                for hop in (getattr(response, "history", None) or [])
+            ],
         )
+        try:
+            server_ms = float(getattr(getattr(response, "elapsed", None), "total_seconds",
+                                      lambda: 0.0)() * 1000)
+        except Exception:  # noqa: BLE001
+            server_ms = 0.0
+        entry["serverMs"] = round(server_ms, 1)
         traffic_dump.append_entry(path, entry)
     except Exception:  # noqa: BLE001 — dump là phụ trợ, không được phá luồng
         pass

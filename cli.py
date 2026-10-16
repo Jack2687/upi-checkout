@@ -548,6 +548,18 @@ def setup() -> None:
     core.DEFAULT_TIMEOUT = 25
     if not os.environ.get("UPI_DUMP"):
         core.dump_http = lambda *a, **k: None
+    else:
+        # Dump cua TIEN TRINH CHA (eligibility, chon proxy, xep hang pool...) — truoc day chi
+        # co traffic cua tien trinh con `extract_cs.py` duoc ghi. Ghi vao nhan rieng "cli" de
+        # khong lan vao file cua tung task.
+        try:
+            sys.path.insert(0, str(HERE))
+            import extract_cs as _ex
+            os.environ.setdefault("UPI_TASK_LABEL", "cli")
+            _ex.install_net_counters()
+            _ex._sync_dump_target(force=True)
+        except Exception as exc:  # noqa: BLE001 — dump la phu tro
+            print(f"dump cli: bo qua ({type(exc).__name__}: {exc})", file=sys.stderr)
     core.log = lambda *a, **k: None
 
 
@@ -1044,6 +1056,9 @@ def cs_subprocess_one(token: str, proxy_path: Path, promo: str, state_dir: Path,
     env = dict(os.environ)
     env.update({
         "PYTHONUNBUFFERED": "1",
+        # Nhan rieng cho tung task: tien trinh cha ghi dump voi nhan "cli", con cua no phai
+        # ghi vao file rieng, khong thi 2 luong traffic tron vao nhau.
+        "UPI_TASK_LABEL": f"t{idx}",
         "UPI_TOKEN": token,
         "UPI_PROXY_SEED_FILE": str(proxy_path.resolve()),
         "UPI_PROXY_STATE_FILE": str(sf),

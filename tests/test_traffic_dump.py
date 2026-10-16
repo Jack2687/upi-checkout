@@ -14,11 +14,33 @@ import traffic_dump as td  # noqa: E402
 
 
 class FakeResp:
-    def __init__(self, payload="{}", status=200, headers=None):
+    def __init__(self, payload="{}", status=200, headers=None, elapsed=0.0, history=None,
+                 cookies=None):
+        import datetime
         self.text = payload
         self.content = payload.encode()
         self.status_code = status
         self.headers = headers or {"content-type": "application/json"}
+        self.elapsed = datetime.timedelta(seconds=elapsed)
+        self.history = history or []
+        self.cookies = cookies
+
+
+class SimpleCookieLike:
+    """Giống cookie jar của requests: có name/value + thuộc tính."""
+
+    class _Cookie:
+        name = "cf_clearance"
+        value = "tok"
+        path = "/"
+        domain = ".chatgpt.com"
+        secure = True
+
+    def items(self):
+        return [("cf_clearance", "tok")]
+
+    def __iter__(self):
+        return iter([self._Cookie()])
 
 
 class BuildEntryTests(unittest.TestCase):
@@ -49,6 +71,36 @@ class BuildEntryTests(unittest.TestCase):
         entry = td.build_entry(method="GET", url="https://chatgpt.com/x", error="ProxyError: boom")
         self.assertEqual(entry["response"]["status"], 0)
         self.assertIn("ProxyError", entry["error"])
+
+    def test_body_is_kept_whole_by_default(self):
+        body = "x" * 500_000
+        entry = td.build_entry(method="POST", url="https://x/y", request_body=body, response_body=body)
+        self.assertEqual(len(entry["request"]["postData"]["text"]), 500_000)
+        self.assertEqual(len(entry["response"]["content"]["text"]), 500_000)
+
+    def test_cookies_are_structured(self):
+        entry = td.build_entry(
+            method="GET", url="https://chatgpt.com/x",
+            request_headers={"Cookie": "oai-did=abc; __cf_bm=xyz"},
+            response_headers={"content-type": "text/html"},
+        )
+        self.assertEqual(entry["request"]["cookies"],
+                         [{"name": "oai-did", "value": "abc"}, {"name": "__cf_bm", "value": "xyz"}])
+        jar = SimpleCookieLike()
+        entry2 = td.build_entry(method="GET", url="https://x/y", response_cookie_jar=jar)
+        self.assertEqual(entry2["response"]["cookies"][0]["name"], "cf_clearance")
+        self.assertEqual(entry2["response"]["cookies"][0]["secure"], True)
+        self.assertEqual(entry2["response"]["cookies"][0]["path"], "/")
+
+    def test_redirect_chain_is_kept(self):
+        entry = td.build_entry(
+            method="GET", url="https://x/final", redirects=[
+                {"status": 302, "url": "https://x/a", "location": "https://x/b"},
+                {"status": 301, "url": "https://x/b", "location": "https://x/final"},
+            ])
+        self.assertEqual(entry["redirectCount"], 2)
+        self.assertEqual(entry["redirects"][0]["status"], 302)
+        self.assertEqual(entry["redirects"][1]["location"], "https://x/final")
 
     def test_body_limit_truncates(self):
         entry = td.build_entry(method="POST", url="https://x/y", request_body="a" * 500,
@@ -141,6 +193,66 @@ class TransportRecorderTests(unittest.TestCase):
         with ex.execution_context({"UPI_DUMP_DIR": str(self.tmp), "UPI_TASK_LABEL": "t8"}):
             wrapped(object(), "GET", "https://chatgpt.com/x")
         self.assertEqual(list(self.tmp.glob("t8/*")), [])
+
+    def test_cookie_jar_elapsed_and_redirects_are_recorded(self):
+        ex = self.ex
+
+        class Hop:
+            status_code = 302
+            url = "https://api.stripe.com/old"
+            headers = {"Location": "https://api.stripe.com/new"}
+
+        def fake_original(session, *args, **kwargs):
+            return FakeResp('{"id": "pm_1"}', 200, {"content-type": "application/json"},
+                            elapsed=0.25, history=[Hop()])
+
+        wrapped = ex._counting_request(fake_original)
+
+        class Jar:                                        # giống cookie jar của requests
+            def items(self):
+                return [("oai-did", "abc")]
+
+        class Session:
+            headers = {"User-Agent": "Chrome/146"}
+            cookies = Jar()
+
+        with ex.execution_context({"UPI_DUMP": "1", "UPI_DUMP_DIR": str(self.tmp),
+                                   "UPI_TASK_LABEL": "t5"}):
+            wrapped(Session(), "POST", "https://api.stripe.com/v1/payment_methods", data={})
+
+        entry = json.loads((self.tmp / "t5" / "t5.jsonl").read_text().splitlines()[0])
+        self.assertEqual(entry["request"]["cookies"],
+                         [{"name": "oai-did", "value": "abc", "path": "/"}])
+        self.assertEqual(entry["serverMs"], 250.0)
+        self.assertEqual(entry["redirectCount"], 1)
+        self.assertEqual(entry["redirects"][0]["location"], "https://api.stripe.com/new")
+
+    def test_raw_body_env_keeps_tokens(self):
+        ex = self.ex
+
+        def fake_original(session, *args, **kwargs):
+            return FakeResp('{"token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"}')
+
+        wrapped = ex._counting_request(fake_original)
+        with ex.execution_context({"UPI_DUMP": "1", "UPI_DUMP_DIR": str(self.tmp),
+                                   "UPI_TASK_LABEL": "t6", "UPI_DUMP_RAW_BODY": "1"}):
+            wrapped(object(), "POST", "https://chatgpt.com/x", data="token=eyJhbGciOiJSUzI1NiJ9")
+        entry = json.loads((self.tmp / "t6" / "t6.jsonl").read_text().splitlines()[0])
+        self.assertIn("eyJhbGciOiJSUzI1NiJ9", entry["request"]["postData"]["text"])
+        self.assertIn("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", entry["response"]["content"]["text"])
+
+    def test_body_tokens_are_masked_by_default(self):
+        ex = self.ex
+
+        def fake_original(session, *args, **kwargs):
+            return FakeResp('{"token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"}')
+
+        wrapped = ex._counting_request(fake_original)
+        with ex.execution_context({"UPI_DUMP": "1", "UPI_DUMP_DIR": str(self.tmp),
+                                   "UPI_TASK_LABEL": "t6b"}):
+            wrapped(object(), "POST", "https://chatgpt.com/x", data="token=eyJhbGciOiJSUzI1NiJ9")
+        entry = json.loads((self.tmp / "t6b" / "t6b.jsonl").read_text().splitlines()[0])
+        self.assertNotIn("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", entry["response"]["content"]["text"])
 
     def test_transport_error_is_recorded_and_reraised(self):
         ex = self.ex

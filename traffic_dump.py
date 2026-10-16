@@ -46,6 +46,62 @@ def header_pairs(headers: Mapping[str, Any] | None) -> list[dict[str, str]]:
     return [{"name": str(key), "value": _as_text(value)} for key, value in (headers or {}).items()]
 
 
+def set_cookie_pairs(header_value: str) -> list[dict[str, str]]:
+    """Header `Set-Cookie` (co the gop nhieu cookie bang ", ") -> [{name, value}] best-effort."""
+    items: list[dict[str, str]] = []
+    for match in re.finditer(r"(?:^|,\s*)([!#$%&'*+.\w-]+)=([^;,]*)", str(header_value or "")):
+        name, value = match.group(1), match.group(2)
+        if name.lower() in ("expires", "path", "domain", "max-age", "samesite"):
+            continue
+        items.append({"name": name, "value": value.strip()})
+    return items
+
+
+def request_cookies(cookie_header: str) -> list[dict[str, str]]:
+    """`Cookie: a=b; c=d` -> [{name, value}] (HAR `request.cookies`)."""
+    items: list[dict[str, str]] = []
+    for part in str(cookie_header or "").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, value = part.partition("=")
+        items.append({"name": name.strip(), "value": value.strip()})
+    return items
+
+
+def response_cookies(jar: Any) -> list[dict[str, str]]:
+    """Cookie jar của response -> HAR `response.cookies` (kèm path/domain/expires/secure)."""
+    items: list[dict[str, str]] = []
+    try:
+        raw = list(jar)                      # RequestsCookieJar: Cookie co ca path/domain/secure
+    except TypeError:
+        raw = []
+    # `curl_cffi`/`requests` co the tra ve KEY (str) khi iterate -> chi giu entry la cookie that.
+    objects = [c for c in raw if not isinstance(c, (str, bytes, tuple))]
+    if objects:
+        listing: list[Any] = objects
+    else:
+        try:
+            listing = list(jar.items())      # jar toi gian: (name, value)
+        except (AttributeError, TypeError):
+            return items
+    for entry in listing:
+        if isinstance(entry, tuple) and len(entry) == 2:
+            items.append({"name": str(entry[0]), "value": str(entry[1]), "path": "/"})
+            continue
+        cookie = getattr(entry, "name", None)
+        if cookie is None:
+            continue
+        row = {"name": str(cookie), "value": str(getattr(entry, "value", "") or "")}
+        for src, dst in (("path", "path"), ("domain", "domain"), ("secure", "secure"),
+                         ("expires", "expires")):
+            value = getattr(entry, src, None)
+            if value not in (None, ""):
+                row[dst] = value if isinstance(value, bool) else str(value)
+        items.append(row)
+    return items
+
+
 def _mime(headers: Mapping[str, Any] | None) -> str:
     for key, value in (headers or {}).items():
         if str(key).lower() == "content-type":
@@ -65,8 +121,11 @@ def build_entry(
     error: str = "",
     elapsed_ms: float = 0.0,
     started: float | None = None,
-    body_limit: int = 200_000,
+    body_limit: int = 0,
     redact: Callable[[str], str] | None = None,
+    request_cookie_jar: Any = None,
+    response_cookie_jar: Any = None,
+    redirects: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Một entry: ĐỦ cả 2 chiều (request + response) của đúng 1 request."""
     now = datetime.fromtimestamp(started if started else datetime.now().timestamp(),
@@ -78,6 +137,8 @@ def build_entry(
     if body_limit > 0:
         req_text, res_text = req_text[:body_limit], res_text[:body_limit]
     parts = urlsplit(url)
+    header_map = {str(k).lower(): _as_text(v) for k, v in (request_headers or {}).items()}
+    redirect_list = [dict(item) for item in (redirects or [])]
     return {
         "startedDateTime": now.isoformat(),
         "time": round(elapsed_ms, 1),
@@ -85,7 +146,9 @@ def build_entry(
             "method": str(method or "GET").upper(),
             "url": url,
             "httpVersion": "HTTP/2" if parts.scheme == "https" else "HTTP/1.1",
-            "cookies": [],
+            # Uu tien header `Cookie` = dung thu da gui tren day; jar chi la du phong.
+            "cookies": (request_cookies(header_map.get("cookie", ""))
+                        or response_cookies(request_cookie_jar)),
             "queryString": [{"name": k, "value": v} for k, v in parse_qsl(parts.query)],
             "headers": header_pairs(request_headers),
             "headersSize": -1,
@@ -97,16 +160,21 @@ def build_entry(
             "status": int(status or 0),
             "statusText": "" if not error else error[:300],
             "httpVersion": "HTTP/2" if parts.scheme == "https" else "HTTP/1.1",
-            "cookies": [],
+            "cookies": (response_cookies(response_cookie_jar)
+                        or set_cookie_pairs(header_map.get("set-cookie", ""))),
             "headers": header_pairs(response_headers),
             "content": {"size": len(res_text), "mimeType": _mime(response_headers), "text": res_text},
             "redirectURL": str((response_headers or {}).get("Location") or ""),
             "headersSize": -1,
             "bodySize": len(res_text),
         },
-        # Hai field bat buoc cua HAR 1.2 (DevTools doc); gia tri 0 vi flow khong do tach tang.
+        # Hai field bat buoc cua HAR 1.2 (DevTools doc). `wait` = thoi gian cho phan hoi
+        # (response.elapsed do requests/curl_cffi do); send/receive flow khong tach duoc tang.
         "cache": {},
         "timings": {"send": 0, "wait": round(elapsed_ms, 1), "receive": 0},
+        # Chuoi redirect THUC TE (response.history) — HAR chuan chi giu 1 `redirectURL`.
+        "redirects": redirect_list,
+        "redirectCount": len(redirect_list),
         "host": parts.netloc,
         "path": parts.path,
         "error": error,
@@ -125,11 +193,11 @@ def dump_path(root: str | Path, label: str) -> Path:
 # "Đích dump" hiện tại: extract_cs đặt khi mỗi execution bắt đầu, để cả process
 # con (sentinel_runner.js qua `child_env()`) ghi vào CÙNG file của task đó.
 # ---------------------------------------------------------------------------
-_target: dict[str, Any] = {"enabled": False, "file": None, "body_limit": 200_000}
+_target: dict[str, Any] = {"enabled": False, "file": None, "body_limit": 0}
 _target_lock = threading.Lock()
 
 
-def set_target(*, enabled: bool, root: str | Path, label: str, body_limit: int = 200_000) -> None:
+def set_target(*, enabled: bool, root: str | Path, label: str, body_limit: int = 0) -> None:
     path = dump_path(root, label) if enabled else None
     with _target_lock:
         _target.update({"enabled": bool(enabled), "file": str(path) if path else None,

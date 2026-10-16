@@ -249,10 +249,21 @@ transport**, phủ mọi call:
   `traffic_dump.child_env()` truyền xuống `check_upi_eligibility._run_node`), gồm cả nhánh
   python fallback bên trong nó.
 
-Định dạng: `dumps/<task>/<task>.jsonl`, mỗi dòng 1 **HAR 1.2 entry** (request + response, kèm
-status, header, body, `time`). Header ghi **nguyên văn** (cần đủ để so/replay với browser thật),
-body thì vẫn đi qua `_redact_text` (che Bearer/token) và bị cắt theo `UPI_DUMP_BODY_LIMIT`
-(mặc định 200.000 ký tự).
+Định dạng: `dumps/<task>/<task>.jsonl`, mỗi dòng 1 **HAR 1.2 entry**, gồm:
+
+* request + response đầy đủ: `status`, header **nguyên văn** (không che), body **không cắt**
+  (`UPI_DUMP_BODY_LIMIT=0` mặc định; đặt số nếu muốn chặn dung lượng),
+* `cookies` **dạng cấu trúc** cho cả 2 chiều (request: từ cookie jar/Cookie header; response:
+  `Set-Cookie` kèm `path`/`domain`/`secure`/`expires`),
+* `time` (đo quanh call) và `serverMs` (`response.elapsed` — thời gian server+network),
+* `redirects` + `redirectCount`: chuỗi redirect thật (`response.history`) mà HAR chuẩn không giữ.
+
+Traffic của **tiến trình cha** `cli.py` (xếp hạng pool, kiểm tra eligibility…) ghi riêng vào
+`dumps/cli/cli.jsonl`; mỗi task con vẫn có file riêng `dumps/t<idx>/` (CLI truyền
+`UPI_TASK_LABEL=t<idx>` xuống con) nên không trộn lẫn.
+
+Body vẫn đi qua `_redact_text` (che Bearer/token **trong body**); muốn body cũng nguyên văn
+(replay y nguyên request) thì đặt `UPI_DUMP_RAW_BODY=1`.
 
 Đổi sang `.har` để mở bằng Chrome DevTools/Charles:
 
