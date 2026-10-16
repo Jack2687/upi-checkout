@@ -771,48 +771,55 @@ def stripe_browser_id() -> str:
 def stripe_radar_session(stripe: Any, stripe_pk: str) -> str:
     """Tạo **Radar Session** (`rse_...`) để gửi kèm `radar_options[session]`.
 
-    Vì sao: theo docs Stripe (radar/optimize-risk-factors), với tích hợp "Direct API" thì
-    **advanced risk factors** (đặc điểm thiết bị/phiên) là nhóm tín hiệu ĐÁNG GIÁ NHẤT —
-    ước tính **+36%** cho model chống gian lận — trong khi email/name/địa chỉ chỉ ~15% và
-    mình đã gửi đủ. Khi tự tokenize (không dùng Elements/Checkout của Stripe) thì các tín
-    hiệu này không được thu tự động, nên phải tạo Radar Session thủ công rồi đính vào
-    PaymentMethod/confirm (`radar_options[session]`).
+    Vì sao: docs Stripe (radar/optimize-risk-factors) nói với tích hợp gọi API trực tiếp,
+    nhóm tín hiệu ĐÁNG GIÁ NHẤT là **advanced risk factors** (đặc điểm thiết bị/phiên, thu qua
+    Radar Session) — ước tính +36% cho model — trong khi email/name/địa chỉ chỉ ~15% và luồng
+    này đã gửi đủ. Tự tokenize (không dùng Elements/Checkout của Stripe) thì Stripe không tự
+    thu, nên phải tạo session rồi đính `radar_options[session]` khi tạo PaymentMethod.
 
-    Chỉ chạy khi `UPI_STRIPE_TELEMETRY=1` (cùng công tắc với telemetry id) — bật để A/B.
-    Trả "" nếu không tạo được; luồng vẫn chạy như cũ.
+    Body của `/v1/radar/session` không được Stripe tài liệu hoá đầy đủ, nên hàm thử lần lượt
+    vài dạng tham số và **ghi log kiểu nào bị từ chối** (đo thực tế: kiểu đầu trả
+    `parameter_unknown`) — nhờ vậy log của job tự chỉ ra dạng đúng.
+
+    Chỉ chạy khi `UPI_STRIPE_TELEMETRY=1`; lỗi thì trả "" và luồng chạy như cũ.
     """
     if not env_bool("UPI_STRIPE_TELEMETRY", False):
         return ""
-    cached = ""
     context = getattr(_run_context, "value", None)
-    if context is not None:
-        cached = str(context.get("radar_session") or "")
+    cached = str((context or {}).get("radar_session") or "")
     if cached:
         return cached
+
     try:
         ids = stripe_telemetry_ids()
-        body = {
-            "key": stripe_pk,
-            "muid": ids.get("muid", ""),
-            "sid": ids.get("sid", ""),
-            "guid": ids.get("guid", ""),
-            "client_attribution_metadata[client_session_id]": str(uuid.uuid4()),
-        }
-        resp = stripe.post("https://api.stripe.com/v1/radar/session", data=body,
-                           headers={"Origin": "https://js.stripe.com",
-                                    "Referer": "https://js.stripe.com/"},
-                           timeout=DEFAULT_TIMEOUT)
-        session = str((resp.json() or {}).get("id") or "") if resp.status_code < 400 else ""
-        if not session:
-            log(f"radar session: không tạo được (HTTP {resp.status_code}: {resp.text[:90]})", "[WARN] ")
-            return ""
-        log(f"radar session: đã tạo {session[:14]}… (gửi kèm radar_options[session])")
-    except Exception as exc:  # noqa: BLE001 — không tạo được thì chạy như cũ
-        log(f"radar session: bỏ qua ({type(exc).__name__}: {str(exc)[:80]})", "[WARN] ")
+    except Exception as exc:  # noqa: BLE001
+        log(f"radar session: không lấy được telemetry id ({type(exc).__name__})", "[WARN] ")
         return ""
-    if context is not None:
-        context["radar_session"] = session
-    return session
+    muid, sid, guid = (ids.get("muid", ""), ids.get("sid", ""), ids.get("guid", ""))
+    variants: tuple[tuple[str, dict[str, str]], ...] = (
+        ("key+muid/sid/guid", {"key": stripe_pk, "muid": muid, "sid": sid, "guid": guid}),
+        ("key+mids[0]", {"key": stripe_pk, "mids[0]": muid}),
+        ("key+radar_session[mids][0]", {"key": stripe_pk, "radar_session[mids][0]": muid}),
+        ("key only", {"key": stripe_pk}),
+    )
+    for name, body in variants:
+        try:
+            resp = stripe.post("https://api.stripe.com/v1/radar/session", data=body,
+                               headers={"Origin": "https://js.stripe.com",
+                                        "Referer": "https://js.stripe.com/"},
+                               timeout=DEFAULT_TIMEOUT)
+            payload = resp.json() if resp.status_code < 400 else {}
+            session = str((payload or {}).get("id") or "")
+        except Exception as exc:  # noqa: BLE001
+            log(f"radar session [{name}]: lỗi {type(exc).__name__}: {str(exc)[:90]}", "[WARN] ")
+            continue
+        if session:
+            log(f"radar session: đã tạo {session[:16]}… (dạng {name}) — gửi kèm radar_options[session]")
+            if context is not None:
+                context["radar_session"] = session
+            return session
+        log(f"radar session [{name}]: HTTP {resp.status_code} {str(resp.text)[:220]}", "[WARN] ")
+    return ""
 
 
 def _task_label() -> str:

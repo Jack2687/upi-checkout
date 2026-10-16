@@ -98,3 +98,39 @@ class RadarSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RadarSessionVariantTests(unittest.TestCase):
+    """Body của /v1/radar/session không được tài liệu hoá đầy đủ -> thử lần lượt + log kiểu sai."""
+
+    def setUp(self):
+        ex._log_file = Path(__import__("tempfile").mkdtemp(prefix="upi-test-")) / "flow.log"
+
+    def test_falls_through_variants_until_one_works(self):
+        seen = []
+
+        class Stripe:
+            def post(self, url, data=None, **kw):
+                seen.append(sorted(data.keys()))
+                if len(seen) < 3:                     # 2 dạng đầu bị từ chối
+                    return FakeResp({"error": {"code": "parameter_unknown"}}, status=400)
+                return FakeResp({"id": "rse_ok"})
+
+        with patch.object(ex, "env_bool", lambda n, d=False: True), \
+             patch.object(ex, "stripe_telemetry_ids",
+                          return_value={"muid": "m", "sid": "s", "guid": "g"}), \
+             ex.execution_context({}):
+            session = ex.stripe_radar_session(Stripe(), "pk")
+        self.assertEqual(session, "rse_ok")
+        self.assertEqual(len(seen), 3)
+        self.assertEqual(seen[0], ["guid", "key", "muid", "sid"])
+
+    def test_returns_empty_when_all_variants_fail(self):
+        class Stripe:
+            def post(self, url, data=None, **kw):
+                return FakeResp({"error": {"code": "parameter_unknown"}}, status=400)
+
+        with patch.object(ex, "env_bool", lambda n, d=False: True), \
+             patch.object(ex, "stripe_telemetry_ids", return_value={}), \
+             ex.execution_context({}):
+            self.assertEqual(ex.stripe_radar_session(Stripe(), "pk"), "")
