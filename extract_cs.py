@@ -315,6 +315,9 @@ def _record_traffic(
         except Exception:  # noqa: BLE001
             server_ms = 0.0
         entry["serverMs"] = round(server_ms, 1)
+        # Cờ để TỰ SOI LEAK: request này có đi qua proxy hay đi thẳng bằng IP của máy?
+        # (requests.get(...) module-level tạo session rỗng -> proxies rỗng -> False)
+        entry["proxied"] = bool(getattr(self, "proxies", None))
         traffic_dump.append_entry(path, entry)
     except Exception:  # noqa: BLE001 — dump là phụ trợ, không được phá luồng
         pass
@@ -755,7 +758,7 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
 
     if not city and postal:
         # Reverse geocode không trả city nhưng có PIN -> lấy quận/huyện thật của PIN.
-        city = pin_district(postal)
+        city = pin_district(postal, proxy)
     if not city or not postal:
         _geo_tier1_store(cache_key, {})
         return {}                       # thiếu city/postal thì Stripe tax dễ toi -> fallback
@@ -779,7 +782,7 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
     # KHÔNG mượn tên đường của thành phố khác trong list cứng: nó tạo địa chỉ vô lý kiểu
     # "72 Banjara Hills Rd 1 / Indore 452001". Không có road (Nominatim trả rỗng) thì lấy
     # tên bưu cục thật của chính PIN đó, còn không nữa thì chỉ ghi số nhà + thành phố.
-    street = road or pin_area_name(postal)
+    street = road or pin_area_name(postal, proxy)
     number = random.randint(1, 199)
     result = {
         "email": f"{first.lower()}{last.lower()}{random.randint(100, 9999)}@{domain}",
@@ -2419,28 +2422,29 @@ def billing_for_round(candidates: list[str]) -> dict[str, Any]:
         + (f": {last}" if last else ""))
 
 
-def pin_area_name(pin: str) -> str:
+def pin_area_name(pin: str, proxy: str = "") -> str:
     """Tên bưu cục/khu vực THẬT của PIN (India Post). Rỗng nếu không tra được."""
     if not pin:
         return ""
     try:
         os.environ.setdefault("UPI_STATE_DIR", str(SCRIPT_DIR / "cs_state"))
         import geobilling  # noqa: PLC0415
-        record = geobilling._pin_record(str(pin), timeout=GEO_BILLING_TIMEOUT) or {}
+        record = geobilling._pin_record(str(pin), timeout=GEO_BILLING_TIMEOUT,
+                                        proxy=proxy) or {}
         areas = [str(a).strip() for a in (record.get("areas") or []) if str(a).strip()]
         return random.choice(areas[:8]) if areas else ""
     except Exception:  # noqa: BLE001 — tra được thì tốt, không thì thôi
         return ""
 
 
-def pin_district(pin: str) -> str:
+def pin_district(pin: str, proxy: str = "") -> str:
     """Quận/huyện THẬT của PIN (India Post) — dùng khi reverse geocode không trả city."""
     if not pin:
         return ""
     try:
         os.environ.setdefault("UPI_STATE_DIR", str(SCRIPT_DIR / "cs_state"))
         import geobilling  # noqa: PLC0415
-        record = geobilling._pin_record(str(pin), timeout=GEO_BILLING_TIMEOUT) or {}
+        record = geobilling._pin_record(str(pin), timeout=GEO_BILLING_TIMEOUT, proxy=proxy) or {}
         return str(record.get("district") or "").strip()
     except Exception:  # noqa: BLE001
         return ""
@@ -2465,7 +2469,8 @@ def verify_billing_address(billing: dict[str, Any], proxy: str = "") -> str:
         try:
             os.environ.setdefault("UPI_STATE_DIR", str(SCRIPT_DIR / "cs_state"))
             import geobilling  # noqa: PLC0415
-            record = geobilling._pin_record(pin, timeout=GEO_BILLING_TIMEOUT) or {}
+            record = geobilling._pin_record(pin, timeout=GEO_BILLING_TIMEOUT,
+                                            proxy=proxy) or {}
         except Exception as exc:  # noqa: BLE001
             log(f"billing check: PIN lookup lỗi ({str(exc)[:60]})", "[WARN] ")
         if record:
@@ -2503,7 +2508,8 @@ def verify_billing_address(billing: dict[str, Any], proxy: str = "") -> str:
                 import geobilling  # noqa: PLC0415
                 for cand in geobilling._seed_pins(str(billing.get("state") or ""),
                                                    timeout=GEO_BILLING_TIMEOUT):
-                    rec = geobilling._pin_record(str(cand), timeout=GEO_BILLING_TIMEOUT) or {}
+                    rec = geobilling._pin_record(str(cand), timeout=GEO_BILLING_TIMEOUT,
+                                                 proxy=proxy) or {}
                     if rec.get("state"):
                         fixed_pin = rec
                         break
@@ -2927,6 +2933,26 @@ def stripe_confirm_upi(
     if resp.status_code >= 400:
         raise RuntimeError(f"UPI confirm failed HTTP {resp.status_code}: {resp.text[:500]}")
     return resp.json() or {}
+
+
+def fetch_via_proxy(url: str, proxy: str = "", *, timeout: int = 30,
+                    headers: dict[str, str] | None = None) -> Any:
+    """GET 1 URL **qua proxy** — dùng cho mọi chỗ cần lấy nội dung trang ngoài.
+
+    Vì sao cần: có 2 chỗ gọi `requests.get(redirect_url)` trực tiếp (lưu artifact), đi bằng
+    IP thật của máy. Mọi request ra ngoài của luồng phải qua proxy của task.
+    """
+    merged = {"User-Agent": DEFAULT_USER_AGENT}
+    merged.update(headers or {})
+    if not proxy:
+        return requests.get(url, headers=merged, timeout=timeout)
+    base = proxy_url_for_requests(proxy)
+    try:
+        target = proxy_for_country(base, UPI_PROVIDER_COUNTRY)
+    except Exception:  # noqa: BLE001 — không có selector country thì dùng nguyên bản
+        target = base
+    return requests.get(url, headers=merged, timeout=timeout,
+                        proxies={"http": target, "https": target})
 
 
 def collect_urls(payload: Any, urls: list[str] | None = None) -> list[str]:
@@ -4521,8 +4547,7 @@ def run_single_link_parallel_mode(
                     try:
                         artifact = {"url": redirect_url,
                                     "created_local": time.strftime("%Y-%m-%d %H:%M:%S")}
-                        rr = requests.get(redirect_url,
-                                          headers={"User-Agent": DEFAULT_USER_AGENT}, timeout=30)
+                        rr = fetch_via_proxy(redirect_url, provider_proxy)
                         mm = re.search(r'<meta id="payload" data-message="([^"]+)"', rr.text)
                         if mm:
                             pp = json.loads(base64.b64decode(mm.group(1)))
@@ -4696,8 +4721,7 @@ def run_single_link_mode(
                     try:
                         artifact = {"url": redirect_url,
                                     "created_local": time.strftime("%Y-%m-%d %H:%M:%S")}
-                        rr = requests.get(redirect_url,
-                                          headers={"User-Agent": DEFAULT_USER_AGENT}, timeout=30)
+                        rr = fetch_via_proxy(redirect_url, provider_proxy)
                         mm = re.search(r'<meta id="payload" data-message="([^"]+)"', rr.text)
                         if mm:
                             pp = json.loads(base64.b64decode(mm.group(1)))

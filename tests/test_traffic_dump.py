@@ -286,6 +286,27 @@ class TransportRecorderTests(unittest.TestCase):
         entry = json.loads((self.tmp / "t6b" / "t6b.jsonl").read_text().splitlines()[0])
         self.assertNotIn("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", entry["response"]["content"]["text"])
 
+    def test_proxied_flag_marks_direct_calls(self):
+        """Cờ `proxied` để soi request nào đi thẳng (lộ IP thật) — vd geobilling trước đây."""
+        ex = self.ex
+        wrapped = ex._counting_request(lambda session, *a, **k: FakeResp())
+
+        class NoProxy:
+            headers = {}
+
+        class WithProxy:
+            headers = {}
+            proxies = {"http": "http://user:pass@1.2.3.4:8080",
+                       "https": "http://user:pass@1.2.3.4:8080"}
+
+        with ex.execution_context({"UPI_DUMP": "1", "UPI_DUMP_DIR": str(self.tmp),
+                                   "UPI_TASK_LABEL": "t7b"}):
+            wrapped(NoProxy(), "GET", "https://nominatim.openstreetmap.org/reverse")
+            wrapped(WithProxy(), "GET", "https://chatgpt.com/api/auth/csrf")
+        entries = [json.loads(l) for l in (self.tmp / "t7b" / "t7b.jsonl").read_text().splitlines()]
+        self.assertIs(entries[0]["proxied"], False)
+        self.assertIs(entries[1]["proxied"], True)
+
     def test_transport_error_is_recorded_and_reraised(self):
         ex = self.ex
 
@@ -299,6 +320,45 @@ class TransportRecorderTests(unittest.TestCase):
                 wrapped(object(), "GET", "https://api.stripe.com/v1/x")
         entry = json.loads((self.tmp / "t9" / "t9.jsonl").read_text().splitlines()[0])
         self.assertIn("TLS connect error", entry["error"])
+
+
+class GeoProxyTests(unittest.TestCase):
+    """geobilling KHÔNG được gọi thẳng ra ngoài (đã từng lộ IP thật + bị ban)."""
+
+    def test_every_geo_session_uses_the_task_proxy(self):
+        import geobilling
+        calls = []
+
+        class FakeSession:
+            headers = {}
+            proxies: dict = {}
+
+            def close(self):
+                pass
+
+        def fake_make_session(proxy="", **kwargs):
+            calls.append(proxy)
+            return FakeSession()
+
+        with patch.object(geobilling, "make_session", fake_make_session), \
+             patch.object(geobilling, "_get_json", lambda *a, **k: {}), \
+             patch.object(geobilling, "_nominatim_wait", lambda: None):
+            geobilling._STORE["reverse"] = {}
+            geobilling._reverse_geocode(12.97, 77.59, timeout=5, proxy="http://px:1")
+            geobilling._STORE["pins"] = {}
+            geobilling._pin_record("560001", timeout=5, proxy="http://px:2")
+        self.assertEqual(calls, ["http://px:1", "http://px:2"])
+        self.assertNotIn("", calls)
+
+    def test_bigdatacloud_client_endpoint_is_gone(self):
+        import geobilling
+        import inspect
+        src = inspect.getsource(geobilling._reverse_bigdatacloud)
+        self.assertIn("UPI_BIGDATACLOUD_KEY", src)              # chỉ dùng khi có key
+        self.assertIn('/data/reverse-geocode"', src)            # endpoint server-side
+        for line in src.splitlines():
+            if line.strip().startswith(("url =", "\"https://api.bigdatacloud")):
+                self.assertNotIn("reverse-geocode-client", line)
 
 
 if __name__ == "__main__":

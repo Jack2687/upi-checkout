@@ -47,7 +47,7 @@ class BillingLineParseTests(unittest.TestCase):
 
 class AddressVerifyTests(unittest.TestCase):
     def verify(self, billing, exit_region="Bihar", exit_code="BR", seeds=("800001",)):
-        with patch("geobilling._pin_record", side_effect=lambda pin, timeout=0: DB.get(pin, {})), \
+        with patch("geobilling._pin_record", side_effect=lambda pin, timeout=0, proxy="": DB.get(pin, {})), \
              patch("geobilling._seed_pins", return_value=list(seeds)), \
              patch("geobilling.probe_exit", return_value={"region": exit_region, "region_code": exit_code}):
             out = dict(billing)

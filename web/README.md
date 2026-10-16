@@ -280,6 +280,41 @@ python3 dumps_to_har.py dumps --summary           # thống kê theo host/status
 **Cảnh báo:** vì header không bị che nên file dump chứa **access token thật**. `dumps/` đã nằm
 trong `.gitignore` — đừng commit, đừng copy ra ngoài repo.
 
+## Rà soát rò IP thật (leak) — mọi request ra ngoài phải qua proxy
+
+Dump toàn bộ API (mục trên) cho phép soi lại từng request, và phát hiện các chỗ **gọi thẳng
+ra Internet không qua proxy** — tức lộ IP thật của máy:
+
+| Chỗ gọi | Hậu quả đo được (16/10) | Xử lý |
+|---|---|---|
+| `geobilling._reverse_geocode()` — Nominatim + BigDataCloud | BigDataCloud trả `402 … your ip address 2402:800:… is now banned` cho **5.580/5.580** lần; Nominatim **5.573 × 429** | Thêm tham số `proxy`, session dùng proxy của task; cache theo toạ độ (6h ok / 15m fail) + nhịp **1,1s/lần** cho Nominatim |
+| `geobilling._reverse_bigdatacloud()` gọi `/data/reverse-geocode-client` | endpoint chỉ dành cho browser → 402 + ban IP | **Bỏ hẳn**; chỉ gọi `/data/reverse-geocode` khi có `UPI_BIGDATACLOUD_KEY`, không key thì không gọi gì |
+| `geobilling._pin_record()` — `api.postalpincode.in` | đi thẳng bằng IP thật | Thêm tham số `proxy` (truyền từ `address_for_proxy` + 4 chỗ trong `extract_cs`) |
+| `web/artifact_probe.probe()` — dò trang instructions | chạy **mỗi 20 giây/link** từ desk, đi thẳng ra `payments.stripe.com` | Thêm tham số `proxy`; engine truyền `task.proxy` (proxy của task được lưu lại trên `Task` vì lease đã trả về pool) |
+| `cli.py` luồng `oaics_`: `POST /v1/confirmation_tokens` và confirm | đi thẳng ra `api.stripe.com` | Thêm `proxies=` |
+| `extract_cs` lưu artifact (`UPI_SAVE_LINK_ARTIFACT`) ×2 chỗ `requests.get(redirect_url)` | đi thẳng | Dùng `fetch_via_proxy()` |
+
+Đã kiểm và **vốn đã đúng** (có proxy): `upi_core.py` init, `at_check.py` ×2, `cli.py` các probe
+egress/init, `extract_cs` tier-1 Nominatim, `ippure._http_get`.
+
+Hai thứ thêm vào để lần sau tự soi được:
+
+* **`extract_cs.dump_http`/recorder ghi cờ `proxied`** cho MỌI request trong dump — `false`
+  nghĩa là request đó đi thẳng bằng IP của máy (`requests.get(...)` module-level tạo session
+  rỗng nên `proxies` rỗng). Muốn rà lại: `python3 dumps_to_har.py dumps --summary` rồi soi
+  hoặc `grep -c '"proxied": false' dumps/*/*.jsonl`.
+* `restart_desk.sh` **từ chối restart khi không đọc được `/api/jobs`** mà service vẫn chạy
+  (job lớn làm endpoint này chậm >60s — đo thật với 5.824 task). Trước đây ca đó bị coi là
+  "không có job" nên restart sẽ giết batch đang chạy; nay phải `--force` mới đi tiếp.
+
+Kiểm chứng lại sau khi sửa (một lần gọi `geobilling.address_for_proxy` với proxy thật):
+
+```
+GET  ip-api.com                   200 proxied=True
+GET  nominatim.openstreetmap.org  200 proxied=True     ← trước đây 429, và đi thẳng
+(không còn request nào tới api.bigdatacloud.net)
+```
+
 ## Lỗi `400 Billing country must match request country`
 
 OpenAI từ chối tạo checkout vì "nước billing phải khớp nước của request" (dù proxy exit là IN

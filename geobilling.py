@@ -69,7 +69,7 @@ _GEO_UA = (
 )
 
 _LOCK = threading.RLock()
-_STORE: dict[str, Any] = {"pins": {}, "seeds": {}, "ledger": [], "exits": {}}
+_STORE: dict[str, Any] = {"pins": {}, "seeds": {}, "ledger": [], "exits": {}, "reverse": {}}
 _STORE_LOADED = False
 
 
@@ -891,7 +891,8 @@ def _load_store() -> None:
     with _LOCK:
         if _STORE_LOADED:
             return
-        loaded: dict[str, Any] = {"pins": {}, "seeds": {}, "ledger": [], "exits": {}}
+        loaded: dict[str, Any] = {"pins": {}, "seeds": {}, "ledger": [], "exits": {},
+                                 "reverse": {}}
         for path, key in ((_PIN_STORE, "pins"), (_SEED_STORE, "seeds"),
                           (_LEDGER_STORE, "ledger")):
             try:
@@ -1113,8 +1114,20 @@ def _reverse_nominatim(session: Any, lat: float, lon: float, timeout: float) -> 
 
 
 def _reverse_bigdatacloud(session: Any, lat: float, lon: float, timeout: float) -> dict[str, Any]:
-    url = ("https://api.bigdatacloud.net/data/reverse-geocode-client"
-           "?latitude=%s&longitude=%s&localityLanguage=en" % (lat, lon))
+    """Reverse geocode qua BigDataCloud — CHỈ khi có API key.
+
+    Đo trên job thật 16/10: bản `/data/reverse-geocode-client` (dành cho browser) trả
+    `402 … does not support server-side operations … your ip address … is now banned` cho
+    **5.580/5.580** lần gọi, kèm luôn việc ban IP. Nên bỏ hẳn đường đó: chỉ gọi endpoint
+    server-side `/data/reverse-geocode` khi có `UPI_BIGDATACLOUD_KEY`, không có key thì
+    không gọi gì cả (đỡ request rác + tránh bị ban).
+    """
+    key = str(os.environ.get("UPI_BIGDATACLOUD_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("bigdatacloud: thiếu UPI_BIGDATACLOUD_KEY (bỏ qua, không gọi)")
+    url = ("https://api.bigdatacloud.net/data/reverse-geocode"
+           "?latitude=%s&longitude=%s&localityLanguage=en&key=%s"
+           % (lat, lon, quote_plus(key)))
     data = _get_json(session, url, timeout)
     if not isinstance(data, dict):
         raise RuntimeError("bigdatacloud returned no data")
@@ -1138,39 +1151,81 @@ def _reverse_bigdatacloud(session: Any, lat: float, lon: float, timeout: float) 
     }
 
 
-def _reverse_geocode(lat: Any, lon: Any, *, timeout: float) -> dict[str, Any]:
+_NOMINATIM_LOCK = threading.Lock()
+_NOMINATIM_LAST = [0.0]
+# Nominatim yêu cầu tối đa 1 request/giây cho MỌI client; đo thật 16/10 khi chạy 5.7k task
+# song song: 5.573/5.617 lần bị 429 vì gọi không giới hạn. Giữ nhịp ở đây + cache theo toạ độ.
+_NOMINATIM_MIN_INTERVAL = 1.1
+_REVERSE_TTL_OK = 6 * 3600
+_REVERSE_TTL_FAIL = 900
+
+
+def _nominatim_wait() -> None:
+    with _NOMINATIM_LOCK:
+        gap = time.time() - _NOMINATIM_LAST[0]
+        if gap < _NOMINATIM_MIN_INTERVAL:
+            time.sleep(_NOMINATIM_MIN_INTERVAL - gap)
+        _NOMINATIM_LAST[0] = time.time()
+
+
+def _reverse_geocode(lat: Any, lon: Any, *, timeout: float, proxy: str = "") -> dict[str, Any]:
+    """Toạ độ -> PIN/state/quận thật, **đi qua proxy của task**.
+
+    Vì sao phải qua proxy: trước đây hàm này tạo session bằng `make_session("")` nên request
+    đi thẳng bằng IP thật của máy — BigDataCloud trả về nguyên địa chỉ IP đó kèm thông báo ban
+    (`your ip address 2402:800:… is now banned`), còn Nominatim thì 429 vì dồn từ một IP.
+    Cache theo toạ độ (làm tròn 3 số) để nhiều task cùng vùng không gọi lại.
+    """
     try:
         lat_f, lon_f = float(lat), float(lon)
     except (TypeError, ValueError):
         return {}
     if not (-90 <= lat_f <= 90 and -180 <= lon_f <= 180):
         return {}
+    cache_key = "%.3f,%.3f" % (lat_f, lon_f)
+    with _LOCK:
+        hit = _STORE["reverse"].get(cache_key)
+    if hit and hit.get("expires", 0) > time.time():
+        return dict(hit["value"])
+
     session = None
+    result: dict[str, Any] = {}
     try:
-        session = make_session("", impersonate="chrome136", user_agent=_GEO_UA)
+        session = make_session(proxy, impersonate="chrome136", user_agent=_GEO_UA)
         for reverse in (_reverse_nominatim, _reverse_bigdatacloud):
             try:
-                result = reverse(session, lat_f, lon_f, timeout)
+                if reverse is _reverse_nominatim:
+                    _nominatim_wait()
+                candidate = reverse(session, lat_f, lon_f, timeout)
             except Exception:  # noqa: BLE001
                 continue
-            if result.get("country_code") == "IN":
-                return result
+            if candidate.get("country_code") == "IN":
+                result = candidate
+                break
     except Exception:  # noqa: BLE001
-        return {}
+        result = {}
     finally:
         if session is not None:
             try:
                 session.close()
             except Exception:  # noqa: BLE001
                 pass
-    return {}
+    with _LOCK:
+        _STORE["reverse"][cache_key] = {
+            "value": dict(result),
+            "expires": time.time() + (_REVERSE_TTL_OK if result else _REVERSE_TTL_FAIL),
+        }
+        if len(_STORE["reverse"]) > 2048:
+            for key in list(_STORE["reverse"])[:512]:
+                _STORE["reverse"].pop(key, None)
+    return result
 
 
 # --------------------------------------------------------------------------
 # 第 3 步：PIN -> 权威 District / State（实时 + 落盘缓存）
 # --------------------------------------------------------------------------
 
-def _pin_record(pin: str, *, timeout: float) -> dict[str, Any]:
+def _pin_record(pin: str, *, timeout: float, proxy: str = "") -> dict[str, Any]:
     pin = validate_pin(pin)
     if not pin:
         return {}
@@ -1183,7 +1238,8 @@ def _pin_record(pin: str, *, timeout: float) -> dict[str, Any]:
     session = None
     value: dict[str, Any] = {}
     try:
-        session = make_session("", impersonate="chrome136", user_agent=_GEO_UA)
+        # Cũng phải qua proxy: đây là request ra ngoài, để thẳng là lộ IP thật của máy.
+        session = make_session(proxy, impersonate="chrome136", user_agent=_GEO_UA)
         data = _get_json(session, "https://api.postalpincode.in/pincode/%s" % pin, timeout)
         entry = data[0] if isinstance(data, list) and data else {}
         offices = entry.get("PostOffice") if isinstance(entry, dict) else None
@@ -1358,7 +1414,8 @@ def address_for_proxy(
 
     exit_state = (canonical_state(exit_info.get("region"))
                   or canonical_state(exit_info.get("region_code")))
-    reverse = _reverse_geocode(exit_info.get("lat"), exit_info.get("lon"), timeout=timeout)
+    reverse = _reverse_geocode(exit_info.get("lat"), exit_info.get("lon"), timeout=timeout,
+                               proxy=proxy)
 
     # 优先信坐标：IP 定位通常只到城市/运营商枢纽，反查出来的才是真实所在邦。
     state = (canonical_state(reverse.get("state"))
@@ -1380,7 +1437,7 @@ def address_for_proxy(
     pin = validate_pin(reverse.get("postal_code"))
     record: dict[str, Any] = {}
     if pin:
-        record = _pin_record(pin, timeout=timeout)
+        record = _pin_record(pin, timeout=timeout, proxy=proxy)
         if record.get("state"):
             # 反查和邮政数据不一致时，以印度邮政为准
             if record["state"] != state:
@@ -1396,7 +1453,7 @@ def address_for_proxy(
             emit("  billing geo: no live PIN found for %s, falling back to the dataset" % state)
             return {}
         pin = random.choice(seeds)
-        record = _pin_record(pin, timeout=timeout)
+        record = _pin_record(pin, timeout=timeout, proxy=proxy)
         if not record:
             emit("  billing geo: PIN %s lookup failed, falling back to the dataset" % pin)
             return {}

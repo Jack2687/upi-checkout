@@ -805,7 +805,9 @@ def oaics_one(token: str, proxy: str, country: str, promo: str = "campaign",
         }
         step("payment_method", "active")
         ct = requests.post("https://api.stripe.com/v1/confirmation_tokens", data=pm,
-                           headers={"User-Agent": UA, "Accept": "application/json"}, timeout=30).json()
+                           headers={"User-Agent": UA, "Accept": "application/json"},
+                           proxies=({"http": proxy, "https": proxy} if proxy else None),
+                           timeout=30).json()
         ct_id = ct.get("id") or ""
         if not ct_id:
             step("payment_method", "fail", err=str(ct)[:160])
@@ -842,7 +844,9 @@ def oaics_one(token: str, proxy: str, country: str, promo: str = "campaign",
             confirm_url,
             data={"return_url": f"{CHATGPT}/checkout/verify", "confirmation_token": ct_id,
                   "key": pk, "_stripe_version": SV, "client_secret": cs},
-            headers={"User-Agent": UA, "Accept": "application/json"}, timeout=30).json()
+            headers={"User-Agent": UA, "Accept": "application/json"},
+            proxies=({"http": proxy, "https": proxy} if proxy else None),
+            timeout=30).json()
         step("artifact", "active")
         na = (c4.get("next_action") or {}) if isinstance(c4, dict) else {}
         inner = na.get("upi_handle_redirect_or_display_qr_code") or {}

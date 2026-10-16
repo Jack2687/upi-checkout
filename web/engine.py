@@ -150,6 +150,9 @@ class Task:
     net_out: int = 0
     net_in: int = 0
     net_requests: int = 0
+    # Proxy đã dùng cho acc này. Giữ lại trên Task vì link monitor chạy SAU khi task xong
+    # (lease đã trả về pool) mà vẫn phải đi qua proxy — không được lộ IP thật khi dò link.
+    proxy: str = ""
     no_retry: bool = False           # lỗi cấp account -> đừng retry (risk decline)
     no_retry_reason: str = ""
     done_at: int = 0                 # epoch lúc task xong -> UI sắp tab Success theo mốc này
@@ -501,7 +504,7 @@ def _link_monitor_targets() -> list[tuple[Job, Task]]:
 
 def _monitor_one(job: Job, task: Task) -> None:
     link = (task.artifact or {}).get("upi_link") or ""
-    probe = artifact_probe.probe(link, fresh=True)
+    probe = artifact_probe.probe(link, fresh=True, proxy=task.proxy)
     now = int(time.time())
     if not task.link_first_seen:
         task.link_first_seen = now
@@ -1502,7 +1505,7 @@ def _verify_link(job: Job, task: Task, result: dict, link: str) -> None:
     """
     if not link or not artifact_probe.is_upi_instructions_url(link):
         return
-    probe = artifact_probe.probe(link)
+    probe = artifact_probe.probe(link, proxy=task.proxy)
     result["intent_state"] = probe.get("intent_state")
     result["fam"] = probe.get("fam")
     result["am"] = probe.get("am")
@@ -1659,6 +1662,9 @@ def _run_task(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> boo
     # ngay, khong con phai cho cham ca pool o POST /api/run. Proxy da verify duoc
     # ghi thanh seed rieng cua task -> ca luong CS cung dung dung IP sach do.
     proxy, seed, verdict = _acquire_proxy(job, task, proxies)
+    # Ghi lai proxy cua task: link monitor (_monitor_one) chay SAU khi task xong va lease da
+    # tra ve pool, nhưng vẫn phải dò trang instructions qua proxy — không thì lộ IP thật.
+    task.proxy = proxy
     if job.stop_requested:
         _finish(job, task, {"status": "STOPPED", "err": "job stopped"}, time.time())
         return False

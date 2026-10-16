@@ -192,11 +192,14 @@ def is_inconclusive(error: str) -> bool:
     return True                             # unreachable / no_payload / exception mạng
 
 
-def probe(url: str, fresh: bool = False) -> dict:
+def probe(url: str, fresh: bool = False, proxy: str = "") -> dict:
     """抓一次指引页并归一成监视状态。任何失败都不抛，只回 ok=False。
 
     `fresh=True` 绕过缓存 —— 前端每 20 秒轮询时要拿最新状态，
     不能吃 120 秒的缓存。
+
+    `proxy` = proxy cua task. Truoc day ham nay goi truc tiep (khong proxy) nen MOI lan
+    theo doi link (20s/lan) deu lo IP that cua may ra payments.stripe.com.
     """
     target = str(url or "").strip()
     if not is_upi_instructions_url(target):
@@ -216,6 +219,7 @@ def probe(url: str, fresh: bool = False) -> dict:
             headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
                      "User-Agent": _UA,
                      "Cache-Control": "no-cache"},
+            proxies=({"http": proxy, "https": proxy} if proxy else None),
         )
         if response.status_code >= 400:
             result = {"ok": False, "error": "http_%s" % response.status_code}
