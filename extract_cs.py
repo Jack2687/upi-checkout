@@ -768,73 +768,6 @@ def stripe_browser_id() -> str:
     return f"{uuid.uuid4()}{uuid.uuid4().hex[:8]}"
 
 
-# `radar_options[session]` có được API nhận hay không (None = chưa biết). Đo trên job thật
-# 16/10: tài khoản này trả 400 `Received unknown parameter: radar_options` khi tạo
-# PaymentMethod, nên hàm tạo PM tự hạ cấp xuống False và cả process thôi tạo Radar Session.
-RADAR_OPTIONS_SUPPORTED: bool | None = None
-
-
-def stripe_radar_session(stripe: Any, stripe_pk: str) -> str:
-    """Tạo **Radar Session** (`rse_...`) để gửi kèm `radar_options[session]`.
-
-    Vì sao: docs Stripe (radar/optimize-risk-factors) nói với tích hợp gọi API trực tiếp,
-    nhóm tín hiệu ĐÁNG GIÁ NHẤT là **advanced risk factors** (đặc điểm thiết bị/phiên, thu qua
-    Radar Session) — ước tính +36% cho model — trong khi email/name/địa chỉ chỉ ~15% và luồng
-    này đã gửi đủ. Tự tokenize (không dùng Elements/Checkout của Stripe) thì Stripe không tự
-    thu, nên phải tạo session rồi đính `radar_options[session]` khi tạo PaymentMethod.
-
-    Body của `/v1/radar/session` không được Stripe tài liệu hoá đầy đủ, nên hàm thử lần lượt
-    vài dạng tham số và **ghi log kiểu nào bị từ chối**. Đo trên job thật (16/10): dạng đầu
-    `key+muid/sid/guid` tạo được `rse_...` ngay, không dạng nào bị từ chối; nhưng
-    `radar_options[session]` khi tạo PaymentMethod lại bị trả `parameter_unknown`, nên phần
-    đính kèm phải tự hạ cấp (xem `stripe_create_upi_pm`).
-
-    Chỉ chạy khi `UPI_STRIPE_TELEMETRY=1`; lỗi thì trả "" và luồng chạy như cũ.
-    """
-    if not env_bool("UPI_STRIPE_TELEMETRY", False):
-        return ""
-    context = getattr(_run_context, "value", None)
-    cached = str((context or {}).get("radar_session") or "")
-    if cached:
-        return cached
-    # Đo thực tế: tài khoản này trả 400 `parameter_unknown` cho `radar_options[session]` khi
-    # tạo PaymentMethod -> session tạo ra cũng không ai dùng, nên khi biết chắc là bị từ chối
-    # thì bỏ luôn bước tạo session (đỡ 1 request/task cho mọi task sau trong cùng process).
-    if RADAR_OPTIONS_SUPPORTED is False:
-        return ""
-
-    try:
-        ids = stripe_telemetry_ids()
-    except Exception as exc:  # noqa: BLE001
-        log(f"radar session: không lấy được telemetry id ({type(exc).__name__})", "[WARN] ")
-        return ""
-    muid, sid, guid = (ids.get("muid", ""), ids.get("sid", ""), ids.get("guid", ""))
-    variants: tuple[tuple[str, dict[str, str]], ...] = (
-        ("key+muid/sid/guid", {"key": stripe_pk, "muid": muid, "sid": sid, "guid": guid}),
-        ("key+mids[0]", {"key": stripe_pk, "mids[0]": muid}),
-        ("key+radar_session[mids][0]", {"key": stripe_pk, "radar_session[mids][0]": muid}),
-        ("key only", {"key": stripe_pk}),
-    )
-    for name, body in variants:
-        try:
-            resp = stripe.post("https://api.stripe.com/v1/radar/session", data=body,
-                               headers={"Origin": "https://js.stripe.com",
-                                        "Referer": "https://js.stripe.com/"},
-                               timeout=DEFAULT_TIMEOUT)
-            payload = resp.json() if resp.status_code < 400 else {}
-            session = str((payload or {}).get("id") or "")
-        except Exception as exc:  # noqa: BLE001
-            log(f"radar session [{name}]: lỗi {type(exc).__name__}: {str(exc)[:90]}", "[WARN] ")
-            continue
-        if session:
-            log(f"radar session: đã tạo {session[:16]}… (dạng {name}) — gửi kèm radar_options[session]")
-            if context is not None:
-                context["radar_session"] = session
-            return session
-        log(f"radar session [{name}]: HTTP {resp.status_code} {str(resp.text)[:220]}", "[WARN] ")
-    return ""
-
-
 def _task_label() -> str:
     """Nhãn task trong log flow (cs_backend đặt UPI_TASK_LABEL=t<idx>)."""
     return str(env_value("UPI_TASK_LABEL", "") or "-")
@@ -2732,25 +2665,12 @@ def stripe_create_upi_pm(stripe: requests.Session, cs_id: str, stripe_pk: str, b
         "client_attribution_metadata[checkout_session_id]": cs_id,
         "key": stripe_pk,
     }
-    radar = stripe_radar_session(stripe, stripe_pk)
-    if radar:
-        # PM là nơi Stripe lưu tín hiệu thiết bị cho MỌI lần dùng sau (off-session) — theo
-        # docs đây là chỗ bắt buộc để Radar Session có tác dụng với mandate định kỳ.
-        body["radar_options[session]"] = radar
     if should_send_vpa(billing):
         body["upi[vpa]"] = billing.get("vpa") or ""
     if billing.get("state"):
         body["billing_details[address][state]"] = billing["state"]
 
     resp = stripe.post("https://api.stripe.com/v1/payment_methods", data=body, timeout=DEFAULT_TIMEOUT)
-    if radar and resp.status_code >= 400 and "radar_options" in str(resp.text):
-        # Tài khoản/API version này không nhận `radar_options` -> bỏ tham số rồi gửi lại NGAY,
-        # để một tham số phụ không giết cả task (đã từng làm chết 89/100 task).
-        global RADAR_OPTIONS_SUPPORTED
-        RADAR_OPTIONS_SUPPORTED = False
-        body.pop("radar_options[session]", None)
-        log("radar_options bị Stripe từ chối (parameter_unknown) — tắt Radar Session cho cả run", "[WARN] ")
-        resp = stripe.post("https://api.stripe.com/v1/payment_methods", data=body, timeout=DEFAULT_TIMEOUT)
     dump_http(resp, "upi_pm", body, "POST", "https://api.stripe.com/v1/payment_methods", force=resp.status_code >= 400)
     if resp.status_code >= 400:
         raise RuntimeError(f"UPI PM creation failed HTTP {resp.status_code}: {resp.text[:500]}")

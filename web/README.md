@@ -203,47 +203,32 @@ Nên giờ mặc định **bỏ luôn checkout/update** khi `amount` khác 0 và
 `promo_not_eligible` (đỡ 1 request checkout/update + 1 lần `stripe_init` ≈ 10–20s mỗi task,
 trên batch 7k là ~7–9 giờ-worker). Bật lại để thử bằng `UPI_TRY_PROMO_UPDATE=1`.
 
-## Radar Session — bù tín hiệu thiết bị mà tích hợp Direct API bị thiếu
+## Radar Session — đã thử, Stripe không nhận, đã bỏ
 
-Đọc docs Stripe ([radar/optimize-risk-factors](https://docs.stripe.com/radar/optimize-risk-factors),
-[radar/radar-session](https://docs.stripe.com/radar/radar-session)): với tích hợp gọi API trực
-tiếp (không dùng Checkout/Elements của Stripe) thì Stripe **không tự thu tín hiệu thiết bị**,
-và họ xếp hạng mức đóng góp của từng nhóm tín hiệu:
+Docs Stripe ([radar/optimize-risk-factors](https://docs.stripe.com/radar/optimize-risk-factors))
+nói với tích hợp gọi API trực tiếp (không dùng Checkout/Elements) thì Stripe không tự thu tín
+hiệu thiết bị, và **advanced risk factors** thu qua **Radar Session** là nhóm đáng giá nhất
+(+36% model). Vì vậy đã thử: tạo `rse_…` bằng `POST /v1/radar/session` rồi đính
+`radar_options[session]` khi tạo UPI PaymentMethod.
 
-| Tín hiệu | Ước tính cải thiện model | Luồng này |
+**Đo trên job thật — bỏ vì Stripe không nhận tham số này:**
+
+| Ngày | Job | Kết quả |
 |---|---|---|
-| **Advanced risk factors** (thiết bị/phiên — qua **Radar Session**) | **36%** | ❌ trước đây không gửi gì |
-| IP address | 12% | ✅ (IP của kết nối) |
-| Customer email | 11% | ✅ `billing_details[email]` |
-| Customer name | 3% | ✅ |
-| Billing address | 1% | ✅ |
+| 16/10 | `4f9dd5274076` | 77/77 task không tạo được session (dạng body `key+mids[0]` bị `parameter_unknown`) |
+| 16/10 | `b3971ef1e10b` | `rse_…` tạo được **ngay** ở dạng `key+muid+sid+guid` (89/89), nhưng `radar_options[session]` khi tạo PM trả `400 parameter_unknown — Received unknown parameter: radar_options` ⇒ **89/100 task chết** |
+| 16/10 | `5f19288946e2` | bản tự hạ cấp chạy đúng: task tạo PM xong, nhưng 2/2 acc vào tới Stripe vẫn `generic_decline` |
 
-Vì vậy giờ có `extract_cs.stripe_radar_session()`: lấy id thật từ `m.stripe.com/6`, gọi
-`POST https://api.stripe.com/v1/radar/session` để lấy `rse_…`, rồi đính
-**`radar_options[session]`** vào lúc tạo UPI PaymentMethod — theo docs đó là chỗ bắt buộc để
-Radar Session có tác dụng với thanh toán định kỳ (off-session).
+Kết luận: API version của tài khoản **không có** `radar_options`, nên Radar Session không thể
+gắn vào luồng này; giữ lại chỉ tốn 1 request/task và có nguy cơ giết task nếu Stripe đổi lỗi.
+⇒ **đã xoá** `stripe_radar_session()` và đoạn đính `radar_options`. Giữ lại
+`stripe_telemetry_ids()` (m.stripe.com) vì nó còn dùng để điền `guid/muid` **thật** vào payload
+init — đó là thứ duy nhất của nhóm tín hiệu này mà luồng gửi được.
 
-Bật/tắt cùng công tắc **"Register Stripe session (m.stripe.com)"** (env
-`UPI_STRIPE_TELEMETRY=1`); không tạo được session thì log WARN và luồng chạy như cũ. Cố ý
-**không** đính `radar_options` vào `payment_pages/{cs}/confirm` vì endpoint đó trả
-`parameter_unknown` với tham số lạ.
-
-**Số đo trên job thật (16/10, 100 acc)** — hai nửa của tính năng này tách hẳn nhau:
-
-* `/v1/radar/session`: dạng đầu tiên `key + muid + sid + guid` tạo được `rse_…` **ngay**
-  (89/89 lần), không dạng nào bị từ chối ⇒ 3 dạng sau chỉ còn để phòng khi Stripe đổi.
-* `radar_options[session]` khi tạo PaymentMethod: Stripe trả
-  `400 parameter_unknown — Received unknown parameter: radar_options` ⇒ API version của tài
-  khoản này **không nhận** tham số đó, và nó từng làm chết **89/100 task** (mọi task đi tới
-  bước tạo PM). Nên `stripe_create_upi_pm()` giờ **tự hạ cấp**: gặp lỗi này thì log 1 dòng
-  WARN, bỏ tham số, gửi lại chính request đó ngay (task không chết), rồi đặt cờ
-  `extract_cs.RADAR_OPTIONS_SUPPORTED = False` để cả process thôi tạo Radar Session và thôi
-  đính `radar_options` — mỗi lần chạy chỉ mất đúng 1 request để "học" điều này.
-
-Hai điểm khác từ docs cần biết: (1) Radar chỉ quét SetupIntent khi bật
-*"Use Radar on payment methods saved for future use"* trong Radar settings — với luồng này
-nó đang BẬT (vì ta nhận `generic_decline` từ SetupIntent); (2) docs khuyến nghị dùng
-Customer object + email/name/địa chỉ — luồng này đã gửi đủ qua `customer_data[...]`.
+Hai điểm khác từ docs vẫn đúng và không cần code: (1) Radar chỉ quét SetupIntent khi bật
+*"Use Radar on payment methods saved for future use"* trong Radar settings — luồng này đang BẬT
+(vì ta nhận `generic_decline` từ SetupIntent); (2) email/name/địa chỉ đã gửi đủ qua
+`billing_details` / `customer_data[...]`.
 
 ## Lỗi `400 Billing country must match request country`
 
