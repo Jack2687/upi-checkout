@@ -1605,12 +1605,25 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
         }
         job.emit({"type": "task_artifact", "task_id": task.task_id, **task.artifact})
 
-    # neu luong dung som: buoc dang active nhung khong co loi -> danh dau fail
+    # Luồng dừng: đánh dấu BƯỚC ĐÃ CHẾT để card hiện đúng chỗ hỏng.
+    # Trước đây chỉ đánh dấu bước đang 'active'; nếu lỗi tới lúc không bước nào active
+    # (vd chết ở tạo checkout ngay sau khi các bước trước đã 'done'/'skip') thì KHÔNG bước
+    # nào đỏ -> UI không cho biết hỏng ở đâu (93% task của job 380a86aad3a0 rơi vào ca này).
+    marked = False
     for s in task.steps:
         if s["status"] == "active":
             s["status"] = "fail"
             if not s.get("err"):
                 s["err"] = task.error or task.raw_status
+            marked = True
+    if not marked and not ok:
+        for s in task.steps:
+            if s["status"] == "pending":
+                s["status"] = "fail"
+                s["err"] = s.get("err") or (task.error or task.raw_status)
+                job.emit({"type": "step", "task_id": task.task_id, "key": s["key"],
+                          "status": "fail", "err": str(s["err"])[:200]})
+                break
 
     task.status = "done" if ok else ("stopped" if task.raw_status.upper() == "STOPPED" else "fail")
     task.updated_at = _now()

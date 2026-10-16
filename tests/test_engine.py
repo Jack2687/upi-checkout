@@ -500,6 +500,33 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertEqual(task.no_retry_reason, "Stripe risk decline (account flagged)")
 
 
+class FailedStepMarkingTests(unittest.TestCase):
+    """Card phải chỉ ra BƯỚC ĐÃ CHẾT, kể cả khi không bước nào đang 'active'."""
+
+    def test_first_pending_step_is_marked_failed(self):
+        job = engine.Job("j1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        task.steps = [{"key": k, "label": lb, "status": "pending", "detail": "", "err": ""}
+                      for k, lb in ((st["key"], st["label"]) for st in engine.cli.steps_for("cs"))][:4]
+        task.steps[0]["status"] = "done"          # runner xong
+        task.steps[1]["status"] = "skip"          # không dùng
+        events = []
+        job.emit = events.append
+        engine._finish(job, task, {"status": "FAIL", "err": "checkout creation failed HTTP 400"}, time.time())
+        failed = [s["key"] for s in task.steps if s["status"] == "fail"]
+        self.assertEqual(failed, ["promo"])       # bước pending đầu tiên = chỗ chết
+        self.assertTrue(any(e.get("status") == "fail" for e in events if e["type"] == "step"))
+
+    def test_active_step_still_wins(self):
+        job = engine.Job("j1", "cs", ["tok"], "IN", "off", 1, "pool", 1, True)
+        task = engine.Task(task_id="t1", index=0, token="tok", email="a@b.c")
+        task.steps = [{"key": "runner", "label": "r", "status": "active", "detail": "", "err": ""},
+                      {"key": "checkout", "label": "c", "status": "pending", "detail": "", "err": ""}]
+        job.emit = lambda ev: None
+        engine._finish(job, task, {"status": "FAIL", "err": "x"}, time.time())
+        self.assertEqual([s["key"] for s in task.steps if s["status"] == "fail"], ["runner"])
+
+
 class AddressPrecheckTests(unittest.TestCase):
     """Proxy không dựng được địa chỉ hoá đơn thì loại NGAY lúc chọn proxy.
 
