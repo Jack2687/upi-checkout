@@ -258,6 +258,10 @@ transport**, phủ mọi call:
 * `time` (đo quanh call) và `serverMs` (`response.elapsed` — thời gian server+network),
 * `redirects` + `redirectCount`: chuỗi redirect thật (`response.history`) mà HAR chuẩn không giữ.
 
+Cả dump tay (`.txt`, 24 điểm `dump_http`) lẫn dump HAR (`.jsonl`) đều nằm trong **cùng một
+thư mục theo task** `dumps/<task>/` — không rải file ra `dumps/` gốc; chạy trực tiếp
+`extract_cs.py` mà không có nhãn thì vào `dumps/manual/`.
+
 Traffic của **tiến trình cha** `cli.py` (xếp hạng pool, kiểm tra eligibility…) ghi riêng vào
 `dumps/cli/cli.jsonl`; mỗi task con vẫn có file riêng `dumps/t<idx>/` (CLI truyền
 `UPI_TASK_LABEL=t<idx>` xuống con) nên không trộn lẫn.

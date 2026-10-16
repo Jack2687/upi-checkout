@@ -220,6 +220,21 @@ def _request_with_connect_retry(original: Any, session: Any, args: tuple, kwargs
 _dump_synced_label: str | None = None
 
 
+def _dump_dir() -> Path:
+    """Thư mục dump của task hiện tại: `<UPI_DUMP_DIR>/<nhãn task>/`.
+
+    Dump tay (`.txt`) và dump HAR (`.jsonl`) nằm CHUNG một thư mục theo task — để không rải
+    file ra `dumps/` gốc rồi không biết file nào của acc nào.
+    """
+    root = Path(str(env_value("UPI_DUMP_DIR", "") or DUMP_DIR))
+    label = _task_label()
+    if label in ("", "-"):
+        label = "manual"
+    folder = root / re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def _sync_dump_target(force: bool = False) -> None:
     """Chốt đích dump cho task hiện tại.
 
@@ -1758,7 +1773,7 @@ def dump_http(
     with _dump_lock:
         _dump_counter += 1
         name = f"{time.strftime('%Y%m%d-%H%M%S')}_{_dump_counter:04d}_{stage}.txt"
-    path = DUMP_DIR / re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+    path = _dump_dir() / re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
     lines = [
         f"stage: {stage}",
         f"request: {request_method} {request_url}",

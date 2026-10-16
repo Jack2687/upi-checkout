@@ -147,6 +147,38 @@ class TargetTests(unittest.TestCase):
         td.set_target(enabled=False, root=self.tmp, label="t9")
 
 
+class TextDumpFolderTests(unittest.TestCase):
+    """Dump tay (.txt) phai nam trong thu muc cua task, khong rai ra dumps/ goc."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="upi-txt-"))
+        import extract_cs as ex
+        import shutil
+        self.ex = ex
+        self.keep = ex._dump_counter
+        ex._log_file = self.tmp / "flow.log"
+
+    def test_written_into_task_folder(self):
+        ex = self.ex
+        with ex.execution_context({"UPI_DUMP": "1", "UPI_DUMP_DIR": str(self.tmp),
+                                   "UPI_TASK_LABEL": "t4"}):
+            ex.dump_http(None, "checkout", {"a": 1}, "POST", "https://chatgpt.com/x")
+        folder = self.tmp / "t4"
+        self.assertTrue(folder.is_dir())
+        files = list(folder.glob("*_checkout.txt"))
+        self.assertEqual(len(files), 1)
+        self.assertIn("stage: checkout", files[0].read_text())
+        # khong co file nao roi ra ngoai
+        self.assertEqual(list(self.tmp.glob("*.txt")), [])
+
+    def test_falls_back_to_manual_folder_without_label(self):
+        ex = self.ex
+        with ex.execution_context({"UPI_DUMP": "1", "UPI_DUMP_DIR": str(self.tmp)}):
+            ex.dump_http(None, "checkout", {}, "POST", "https://chatgpt.com/x")
+        self.assertTrue((self.tmp / "manual").is_dir())
+
+
 class TransportRecorderTests(unittest.TestCase):
     """Recorder phải chạy trong chính wrapper transport của extract_cs."""
 
