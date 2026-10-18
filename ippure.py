@@ -674,11 +674,11 @@ def judge(probe: dict[str, Any], target_country: str = "IN",
     ip = str(probe["ip"])
 
     score = W_REACH
-    if probe.get("cf_challenge"):
+    cf_blocked = bool(probe.get("cf_challenge"))
+    if cf_blocked:
         # Cloudflare challenge = IP bị chấm xấu: flow đi qua đây sẽ chết ở bước tạo checkout.
         flags.append("cf-challenge")
         detail.append("Cloudflare JS challenge (403 cf-mitigated=challenge)")
-        score = min(score, 30)
     latency_ms = probe.get("latency_ms")
     score += latency_points(latency_ms)
     if isinstance(latency_ms, int) and latency_ms >= 6000:
@@ -709,10 +709,13 @@ def judge(probe: dict[str, Any], target_country: str = "IN",
         if tz and tz == target_tz:
             score += W_TZ
         score = max(0, min(100, score))
+        if cf_blocked:
+            score = min(score, 30)          # trần điểm: proxy bị CF chặn không dùng được
         return {**probe, "ok": True, "ip": ip, "country": country, "timezone": tz,
                 "user_type": "", "risk": None, "verdict": "", "score": score,
                 "quality_reason": reason_q,
-                "grade": grade_of(score, flags), "flags": flags, "reasons": detail}
+                "grade": grade_of(min(score, 30) if cf_blocked else score, flags),
+            "flags": flags, "reasons": detail}
 
     pts, why = quality_points(probe.get("risk_score"))
     score += pts
@@ -780,6 +783,11 @@ def judge(probe: dict[str, Any], target_country: str = "IN",
             score = min(score, CAP_MID)
             detail.append(f"risk={int(rs)} > {RISK_CAP_MID} -> kẹp {CAP_MID} (xếp cuối)")
 
+    if cf_blocked:
+        # Trần điểm cho proxy bị Cloudflare chặn: mọi task qua nó chết ở bước tạo checkout,
+        # nên nó phải xếp cuối/ bị loại chứ không được điểm cao vì IP "sạch".
+        score = min(score, 30)
+        detail.append(f"cf-challenge -> kẹp 30 (loại khi bật lọc proxy)")
     score = max(0, min(100, score))
     return {"ok": True, "ip": ip, "country": country, "timezone": tz,
             "family": probe.get("family", ""), "colo": probe.get("colo", ""),

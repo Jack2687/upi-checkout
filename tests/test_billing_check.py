@@ -113,3 +113,30 @@ class GeoCacheTests(unittest.TestCase):
         with patch.object(ex, "env_value", lambda n, d=None: d):
             self.assertEqual(ex._geo_tier1_ttl(True), 21600.0)
             self.assertEqual(ex._geo_tier1_ttl(False), 300.0)
+
+
+class CfChallengeGradeTests(unittest.TestCase):
+    """Proxy bị Cloudflare chặn (403 cf-mitigated=challenge) phải bị xếp cuối/loại.
+
+    Đo 18/10 trên pool: 9/24 proxy đi qua, 14/24 bị challenge -> chặn theo uy tín từng IP,
+    và job nào rơi vào IP bị chấm xấu thì mọi task chết ở "checkout creation failed HTTP 403".
+    """
+
+    def test_challenged_proxy_is_capped_and_flagged(self):
+        import ippure
+        base = {"ip": "1.2.3.4", "country": "IN", "latency_ms": 150, "quality_present": True,
+                "risk_score": 2, "is_residential": True}
+        blocked = ippure.judge({**base, "cf_challenge": True, "cf_status": 403}, "IN")
+        clear = ippure.judge({**base, "cf_challenge": False, "cf_status": 200}, "IN")
+        self.assertIn("cf-challenge", blocked["flags"])
+        self.assertLessEqual(blocked["score"], 30)
+        self.assertEqual(blocked["grade"], "F")
+        self.assertNotIn("cf-challenge", clear["flags"])
+        self.assertGreater(clear["score"], blocked["score"])
+
+    def test_engine_filter_drops_the_flag(self):
+        from pathlib import Path
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "web"))
+        import engine
+        self.assertIn("cf-challenge", engine.PROXY_DROP_FLAGS)

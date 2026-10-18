@@ -1442,6 +1442,12 @@ def _proxy_exit_ip(proxy: str) -> str:
     return str((_cached_verdict(proxy) or {}).get("ip") or "")
 
 
+# Cờ khiến proxy bị LOẠI ngay khi bật bộ lọc (không chỉ xếp cuối). `cf-challenge` = IP bị
+# Cloudflare chấm xấu, mọi task qua nó chết ở bước tạo checkout.
+PROXY_DROP_FLAGS = frozenset({"unreachable", "wrong-country", "tor", "malicious",
+                              "cf-challenge"})
+
+
 def _proxy_verdict_ttl() -> float:
     return float(os.environ.get("UPI_PROXY_VERDICT_TTL") or 900)
 
@@ -1579,7 +1585,7 @@ def _verdict_usable(verdict: dict, target_country: str) -> bool:
     flags = set(verdict.get("flags") or ())
     # `cf-challenge` = proxy bị Cloudflare chấm xấu: mọi task qua nó chết ở bước tạo checkout
     # (đo 18/10: 14/24 proxy như vậy), nên loại ngay khi bật bộ lọc proxy.
-    if {"unreachable", "wrong-country", "tor", "malicious", "cf-challenge"} & flags:
+    if PROXY_DROP_FLAGS & flags:
         return False
     cc = str(verdict.get("country") or "").upper()
     return (not target_country) or cc == str(target_country).upper()
