@@ -2109,7 +2109,9 @@ def create_checkout(chatgpt: requests.Session, country: str) -> dict[str, str]:
         if is_user_already_paid_error(resp.text):
             raise RuntimeError("User is already paid")
         log(f"checkout bi chan HTTP {resp.status_code} | server={resp.headers.get('server', '?')} "
-            f"cf-ray={resp.headers.get('cf-ray', '-')} | {html_excerpt(resp.text)}", "[WARN] ")
+            f"cf-ray={resp.headers.get('cf-ray', '-')} "
+            f"cf-mitigated={resp.headers.get('cf-mitigated', '-')} | {html_excerpt(resp.text)}",
+            "[WARN] ")
         raise RuntimeError(f"checkout creation failed HTTP {resp.status_code}: {resp.text[:500]}")
 
     data = resp.json() or {}
@@ -4404,11 +4406,15 @@ def run_single_link_attempt(
                         "không thử proxy khác", "[WARN] ")
                     break
                 if "checkout creation failed HTTP 403" in error:
-                    # Cloudflare/OpenAI chặn tạo checkout: đo thực tế 403 rải ĐỀU trên mọi
-                    # proxy (trung vị 92%, 419 proxy), nên thử proxy khác là vô ích — dừng
-                    # ngay để không đốt thêm 2 lượt checkout nữa (UPI_CHECKOUT_RETRY_MAX=3).
-                    log("checkout bị chặn 403 — không thử proxy khác cho chặng này", "[WARN] ")
-                    break
+                    # Cloudflare chặn theo UY TÍN TỪNG IP. Đo 18/10 trên pool hiện tại:
+                    # 14/24 proxy bị `cf-mitigated: challenge`, nhưng 9/24 đi qua bình thường
+                    # -> thử proxy KHÁC là có ích (khác hẳn kết luận cũ "403 rải đều, thử vô
+                    # ích"). Đổi proxy coi như đánh dấu proxy này hỏng; số ứng viên vẫn bị chặn
+                    # bởi UPI_CHECKOUT_RETRY_MAX nên không đốt vô hạn.
+                    log("checkout bị Cloudflare chặn 403 (challenge) — thử proxy khác", "[WARN] ")
+                    record_failure_by_stage(f"checkout blocked 403 (cf challenge): {error}",
+                                            checkout_proxy, "")
+                    continue
 
         _log_context.prefix = f"[UPI {attempt}/{upi_retry}] "
         if not checkout or not checkout_proxy_used:

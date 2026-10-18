@@ -1577,7 +1577,9 @@ def _verdict_usable(verdict: dict, target_country: str) -> bool:
     if not verdict or not verdict.get("ok"):
         return False
     flags = set(verdict.get("flags") or ())
-    if {"unreachable", "wrong-country", "tor", "malicious"} & flags:
+    # `cf-challenge` = proxy bị Cloudflare chấm xấu: mọi task qua nó chết ở bước tạo checkout
+    # (đo 18/10: 14/24 proxy như vậy), nên loại ngay khi bật bộ lọc proxy.
+    if {"unreachable", "wrong-country", "tor", "malicious", "cf-challenge"} & flags:
         return False
     cc = str(verdict.get("country") or "").upper()
     return (not target_country) or cc == str(target_country).upper()
@@ -1810,7 +1812,9 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
         task.no_retry = True
         task.no_retry_reason = ("account region does not match the IN billing country "
                                 "(OpenAI 400) — retry cannot fix it")
-    elif "blocked checkout creation" in (task.error or ""):
+    elif ("blocked checkout creation" in (task.error or "")
+          or "chặn tạo checkout" in (task.error or "")
+          or "cf-mitigated=challenge" in (task.error or "")):
         # Cloudflare chặn ngay bước tạo checkout: lần chạy lại gần như chắc chắn bị chặn
         # tiếp (đo thật 12 job gần nhất: 2.209 lần thử lại sau 403 -> 0 lần ra link),
         # nên retry chỉ đốt thêm dung lượng proxy. Bỏ retry cho tới khi hết sóng 403.

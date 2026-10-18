@@ -326,6 +326,38 @@ Giới hạn còn lại: snapshot **không lưu token** (cố ý — token là b
 khi chuyển sang `succeeded` sẽ **không** tự chạy được bước dò Plus (badge "Plus Success" chỉ
 hiện với job còn trong RAM).
 
+## Lỗi `Cloudflare chặn tạo checkout (HTTP 403, cf-mitigated=challenge)`
+
+Không phải Stripe, cũng không phải account bị khoá: **Cloudflare chặn ngay ở
+`POST https://chatgpt.com/backend-api/payments/checkout`** trước khi flow chạm Stripe. Body trả
+về là trang JS challenge (`Enable JavaScript and cookies to continue`), header
+`cf-mitigated: challenge`, `cf-ray` với colo Ấn Độ (MAA/DEL/BOM/AMD…). Client của flow là HTTP
+thuần (không chạy JS) nên không thể vượt; `cf_clearance` thì flow **không** có (cookie gửi lên chỉ
+có `oai-did`).
+
+Đo trên pool hiện tại (18/10) bằng chính endpoint `https://chatgpt.com/api/auth/csrf`:
+
+| Kết quả | Số proxy |
+|---|---|
+| `200` (đi qua bình thường) | **9/24** |
+| `403 + cf-mitigated: challenge` | **14/24** |
+| lỗi TLS | 1/24 |
+
+⇒ chặn theo **uy tín từng IP**, không phải chặn cả tài khoản. Nên cách xử lý là **chọn/đổi proxy**,
+không phải bỏ account:
+
+* `ippure.cf_challenge()` — canary mới: gọi `/api/auth/csrf` qua proxy trong lúc chấm điểm, gắn cờ
+  `cf-challenge` (điểm tối đa 30 ⇒ grade tụt) khi gặp `403 + cf-mitigated: challenge`.
+* Bộ lọc proxy (`filter_proxies`) **loại luôn** proxy mang cờ này (cùng nhóm với
+  `unreachable`/`wrong-country`), nhờ vậy job không chết oan vì rơi vào IP bị chấm xấu.
+* Trong flow: 403 ở bước tạo checkout **không còn `break`** — đo lại cho thấy 9/24 proxy đi qua
+  được nên đổi proxy là có ích; proxy đó bị đánh dấu hỏng (`record_failure_by_stage`) và số lần
+  thử vẫn bị chặn bởi `UPI_CHECKOUT_RETRY_MAX`.
+* Nhãn lỗi trên UI đổi thành **“Cloudflare chặn tạo checkout (HTTP 403, cf-mitigated=challenge) —
+  proxy IP bị chấm xấu, chưa hề chạm Stripe”** (trước đây ghi “OpenAI blocked checkout creation”,
+  dễ hiểu sai là OpenAI khoá account). Vẫn đánh `no_retry` cho account vì chạy lại cùng acc với
+  cùng vùng proxy gần như chắc chắn dính tiếp.
+
 ## Rà soát rò IP thật (leak) — mọi request ra ngoài phải qua proxy
 
 Dump toàn bộ API (mục trên) cho phép soi lại từng request, và phát hiện các chỗ **gọi thẳng

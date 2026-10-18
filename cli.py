@@ -1017,7 +1017,8 @@ def classify_cs_outcome(lines: list[str], stage: str, err: str | None,
         # approve": lỗi cũ chỉ ghi "flow stopped at step 'approve' | last log …" nên
         # đọc UI tưởng lỗi ở Stripe. Nêu đúng nguyên nhân để biết chặn ở đâu.
         if is_checkout_blocked(lines):
-            err = "OpenAI blocked checkout creation (HTTP 403) — never reached Stripe"
+            err = ("Cloudflare chặn tạo checkout (HTTP 403, cf-mitigated=challenge) — "
+                   "proxy IP bị chấm xấu, chưa hề chạm Stripe")
         elif transport_failure_stage(lines):
             err = ("proxy transport error at '%s' stage (TLS/connection) — no link"
                    % transport_failure_stage(lines))

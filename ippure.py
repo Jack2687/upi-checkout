@@ -400,6 +400,29 @@ def _parse_trace(text: str) -> dict[str, str]:
     return out
 
 
+CF_CANARY_URL = "https://chatgpt.com/api/auth/csrf"
+
+
+def cf_challenge(proxy: str, timeout: int = 15) -> dict[str, Any]:
+    """Kiểm tra proxy có bị Cloudflare chặn bằng JS challenge hay không.
+
+    Vì sao cần: Cloudflare chặn theo UY TÍN TỪNG IP. Đo thật 18/10 trên pool hiện tại:
+    **14/24 proxy (58%)** trả `403 + cf-mitigated: challenge` cho chính endpoint này, trong khi
+    9/24 đi qua bình thường. Job nào rơi vào proxy bị chấm xấu thì mọi task chết ở
+    "checkout creation failed HTTP 403" dù account/proxy còn sống — nên phải biết TRƯỚC khi chạy.
+
+    Trả {"cf_challenge": bool, "cf_status": int}. Lỗi mạng -> {} (không kết luận oan).
+    """
+    try:
+        resp = _http_get(CF_CANARY_URL, proxy=proxy, timeout=timeout)
+    except Exception:  # noqa: BLE001 — không đo được thì thôi
+        return {}
+    status = int(getattr(resp, "status_code", 0) or 0)
+    headers = {str(k).lower(): v for k, v in dict(getattr(resp, "headers", {}) or {}).items()}
+    mitigated = str(headers.get("cf-mitigated") or "").lower()
+    return {"cf_challenge": status == 403 and mitigated == "challenge", "cf_status": status}
+
+
 def _exit_ip(proxy: str, timeout: int) -> dict[str, Any]:
     """IP mà proxy xuất ra. Ưu tiên trace chatgpt.com (đúng host flow)."""
     t0 = time.time()
@@ -441,6 +464,9 @@ def probe_exit(proxy: str, timeout: int = 20) -> dict[str, Any]:
     if not proxy or not enabled():
         return {}
     probe = _exit_ip(proxy, timeout)
+    cf = cf_challenge(proxy, min(20, max(8, timeout)))
+    if cf:
+        probe.update(cf)
     pub = public_info(proxy, timeout)
     if not probe.get("ip") and pub.get("ip"):
         probe = dict(pub)
@@ -648,6 +674,11 @@ def judge(probe: dict[str, Any], target_country: str = "IN",
     ip = str(probe["ip"])
 
     score = W_REACH
+    if probe.get("cf_challenge"):
+        # Cloudflare challenge = IP bị chấm xấu: flow đi qua đây sẽ chết ở bước tạo checkout.
+        flags.append("cf-challenge")
+        detail.append("Cloudflare JS challenge (403 cf-mitigated=challenge)")
+        score = min(score, 30)
     latency_ms = probe.get("latency_ms")
     score += latency_points(latency_ms)
     if isinstance(latency_ms, int) and latency_ms >= 6000:

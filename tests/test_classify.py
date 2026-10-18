@@ -22,7 +22,10 @@ class ClassifyCheckoutBlockTests(unittest.TestCase):
     def test_checkout_403_gets_its_own_message(self):
         status, err, link, has_qr = cli.classify_cs_outcome(BLOCKED, "approve", None, False)
         self.assertEqual(status, "FAIL")
-        self.assertIn("blocked checkout creation", err)
+        # Nhãn mới nói rõ Cloudflare challenge (proxy IP bị chấm) thay vì đổ cho OpenAI/Stripe.
+        self.assertIn("chặn tạo checkout", err)
+        self.assertIn("cf-mitigated=challenge", err)
+        self.assertIn("chưa hề chạm Stripe", err)
         self.assertIn("403", err)
         self.assertNotIn("flow stopped at step", err)
         self.assertEqual((link, has_qr), ("", False))

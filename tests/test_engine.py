@@ -458,6 +458,12 @@ class RetryPolicyTests(unittest.TestCase):
         engine._finish(job, task, {"status": "FAIL", "err": err}, time.time())
         return task
 
+    def test_cf_challenge_marks_no_retry(self):
+        """Nhãn mới (Cloudflare challenge) vẫn phải bị đánh no_retry như nhãn 403 cũ."""
+        t = self.finish("Cloudflare chặn tạo checkout (HTTP 403, cf-mitigated=challenge) — "
+                        "proxy IP bị chấm xấu, chưa hề chạm Stripe")
+        self.assertTrue(t.no_retry)
+
     def test_checkout_403_marks_no_retry(self):
         t = self.finish("OpenAI blocked checkout creation (HTTP 403) — never reached Stripe")
         self.assertTrue(t.no_retry)
