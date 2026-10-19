@@ -280,6 +280,50 @@ python3 dumps_to_har.py dumps --summary           # thống kê theo host/status
 **Cảnh báo:** vì header không bị che nên file dump chứa **access token thật**. `dumps/` đã nằm
 trong `.gitignore` — đừng commit, đừng copy ra ngoài repo.
 
+## Vì sao ghi `results.json` thất bại: btrfs hết METADATA (không phải hết đĩa)
+
+Sự cố 19/10 lúc 22:46: `write_results()` báo `OSError: [Errno 28] No space left on device`…
+**trong khi `df -h` còn 35 GB trống**. Chi tiết đo được:
+
+```
+$ findmnt -no FSTYPE,OPTIONS --target .        → btrfs, compress=zstd:1, space_cache=v2
+$ btrfs filesystem usage /home
+    Device allocated:     195.31GiB
+    Device unallocated:     1.00MiB     ← đã cấp hết, không thể tạo chunk mới
+    Free (statfs, df):     34.55GiB     ← "trống" nằm trong chunk DATA
+    Metadata,DUP: Size 4.50GiB, Used 3.62GiB (80.36%)   ← METADATA sắp đầy
+```
+
+btrfs tách không gian thành chunk **data** và **metadata** (ở đây metadata nhân đôi = DUP 2×).
+Khi metadata gần đầy mà **không còn không gian chưa cấp phát** để mở chunk mới, kernel trả
+`ENOSPC` cho thao tác **tạo file mới** — dù dữ liệu vẫn còn 34 GB. Đó chính là lỗi ghi file.
+
+Cái gì đẩy metadata tới đó:
+
+| Nguồn | Đo được |
+|---|---|
+| `cs_state/web_seed_<job>_<task>.txt` — **mỗi task 1 file, không ai xoá** | **10.492 file** |
+| `cs_state/<job>/cs_<idx>.json` — mỗi task 1 file | 1.000+ file |
+| Thư mục job cũ (118 job) | `cs_state` **360.768 file** (1,4 GB) |
+| `results.json` 11–24 MB bị **ghi lại mỗi 2 giây** khi job chạy | write amplification rất lớn |
+
+Bằng chứng trực tiếp: lần ghi headline bị ENOSPC → xoá 118 thư mục job cũ (≈335k file) → **ghi
+lại đúng file đó thành công ngay**.
+
+Cách chữa đã áp dụng:
+
+* `_cleanup_task_files()` — xoá seed + `cs_<idx>.json` **ngay khi task xong** (số file còn ~ số
+  worker thay vì ~ số task).
+* `_cleanup_job_files()` — job kết thúc thì xoá seed lẻ + cả thư mục `cs_state/<job>/`.
+* `CHECKPOINT_SECS` 2s → **10s** (`UPI_CHECKPOINT_SECS`) cho `results.json`.
+* `write_results()` **không nuốt lỗi** nữa: log + đẩy lên UI, và lưu `write_error` vào snapshot.
+* `start_job()` **từ chối chạy** khi đĩa còn < `UPI_MIN_FREE_MB` (mặc định 1024 MB).
+* `recover_results.py` dựng lại kết quả từ flow log nếu đã lỡ mất (mặc định dry-run).
+* Dọn tay một lần: `cs_state` 360.768 → **4.007 file** (1,4 GB → 17 MB).
+
+Khi `btrfs filesystem usage` cho thấy `Device unallocated` ≈ 0 hoặc Metadata > 85%, cần cân bằng
+lại (quyền root): `sudo btrfs balance start -dusage=50 -musage=50 /home`.
+
 ## Link hiện "Link created" / "Not verified yet" — khác "Awaiting payment"
 
 Chip trạng thái link có 3 mức khác nhau, đừng nhầm:

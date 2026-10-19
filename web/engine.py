@@ -46,6 +46,10 @@ STATE_DIR = ROOT / "cs_state"
 _LOG_DIR_ENV = os.environ.get("UPI_WEB_LOG_DIR", "").strip()
 LOG_DIR = Path(_LOG_DIR_ENV) if _LOG_DIR_ENV else ROOT / "logs"
 MAX_JOBS = 20
+# Snapshot của job 5.000 acc là 11–24 MB; ghi lại mỗi 2 giây = write amplification rất lớn trên
+# btrfs (và từng góp phần làm FS hết metadata). 10 giây vẫn đủ mịn cho UI, mất tối đa 10 giây
+# tiến độ nếu process chết.
+CHECKPOINT_SECS = float(os.environ.get("UPI_CHECKPOINT_SECS") or 10)
 MAX_LOGS_PER_TASK = 200
 # Trần số access token mỗi batch: MẶC ĐỊNH KHÔNG GIỚI HẠN (0).
 # Task đang chờ chỉ là 1 record nhỏ (chỉ task đang chạy mới tốn ~26 MB), nhưng
@@ -347,7 +351,7 @@ class Job:
         # half a JSON document, including concurrent completion/removal.
         with self._lock:
             now = time.monotonic()
-            if checkpoint and now - self._last_checkpoint < 2:
+            if checkpoint and now - self._last_checkpoint < CHECKPOINT_SECS:
                 return
             try:
                 temp = self.results_path.with_suffix(".json.tmp")
@@ -2236,6 +2240,22 @@ def _run_with_retries(job: Job, task: Task, proxy_file: Path,
                 break
 
 
+def _cleanup_task_files(job: Job, task: Task) -> None:
+    """Xoá file tạm của task ngay khi xong.
+
+    Vì sao: mỗi task sinh `cs_state/web_seed_<job>_<task>.txt` (và `cs_state/<job>/cs_<idx>.json`)
+    mà KHÔNG ai xoá. Đo 19/10: **10.492 file web_seed_*** + 1.000 cs_*.json — chính đống file này
+    làm btrfs hết chỗ metadata và khiến desk ghi results.json thất bại (`ENOSPC`) dù `df` còn 35 GB
+    (xem README). File seed chỉ cần trong lúc task chạy.
+    """
+    for path in (STATE_DIR / f"web_seed_{job.job_id}_{task.task_id}.txt",
+                 job.state_dir / f"cs_{task.index}.json"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def _run_task_limited(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> None:
     """Only the job executor calls this; queued work checks Stop on entry."""
     try:
@@ -2244,6 +2264,7 @@ def _run_task_limited(job: Job, task: Task, proxy_file: Path, proxies: list[str]
         _finish(job, task, {"status": "ERROR", "err": str(exc)[:200]}, time.time())
     finally:
         _release_task_proxy(job.job_id, task.task_id)
+        _cleanup_task_files(job, task)
         with job._lock:
             job._pending.discard(task.task_id)
             if not job._pending:
@@ -2252,9 +2273,28 @@ def _run_task_limited(job: Job, task: Task, proxy_file: Path, proxies: list[str]
                 job.write_results(checkpoint=True)
 
 
+def _cleanup_job_files(job: Job) -> None:
+    """Dọn file tạm của cả job (seed lẻ + thư mục state) sau khi job kết thúc."""
+    try:
+        for path in STATE_DIR.glob(f"web_seed_{job.job_id}_*.txt"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        for path in STATE_DIR.glob(f"web_proxies_{job.job_id}*.txt"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        shutil.rmtree(job.state_dir, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _complete_job(job: Job) -> None:
     """Caller holds job._lock; append/retry cannot race finalization."""
     _clear_job_proxy_state(job.job_id)
+    _cleanup_job_files(job)
     job.duration_ms = int((time.time() - job._t0) * 1000)
     job.finished_at = _now()
     job.status = "stopped" if job.stop_requested else "done"
