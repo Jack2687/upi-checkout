@@ -153,6 +153,34 @@ class LedgerTests(unittest.TestCase):
         # `task_link` (đổi trạng thái) + `task_plus` (bắt đầu dò Plus vì khách đã duyệt)
         self.assertEqual([e["type"] for e in emitted][0], "task_link")
 
+    def test_network_error_retries_with_another_proxy(self):
+        """Proxy ghim lỗi TLS thì phải dò hộ bằng proxy khác đã từng đọc được."""
+        # một entry "tốt" khác để lấy proxy dự phòng
+        self.upsert(task_id="tB", checked_at=int(time.time()) - 600,
+                    proxy="http://user:pass@good:9090")
+        engine.link_watch_upsert(JOB, "tB", LINK, "http://user:pass@good:9090",
+                                 state="succeeded", checked_at=int(time.time()),
+                                 proxy_ok_at=int(time.time()))
+        engine._ledger_save()
+        bad = self.upsert(checked_at=int(time.time()) - 7200,
+                          proxy="http://user:pass@bad:8080")
+
+        calls: list[str] = []
+
+        def fake_probe(_url, **_kw):
+            calls.append(str(_kw.get("proxy")))
+            if "@bad" in str(_kw.get("proxy")):
+                return {"ok": False, "error": "SSLError"}
+            return {"ok": True, "status": "succeeded", "fam": "1.00"}
+
+        with patch.object(engine.artifact_probe, "probe", side_effect=fake_probe):
+            engine._monitor_one(bad)
+        saved = engine.link_watch_get(JOB, "t1")
+        self.assertEqual(saved["state"], "succeeded")
+        # đã đổi sang proxy đọc được để lần sau khỏi lỗi lại
+        self.assertEqual(saved["proxy"], "http://user:pass@good:9090")
+        self.assertGreater(saved.get("proxy_ok_at") or 0, 0)
+
     # --- UI đọc trạng thái từ sổ -----------------------------------------
     def test_snapshot_overlay_shows_the_new_link_state(self):
         self.upsert(state="succeeded")

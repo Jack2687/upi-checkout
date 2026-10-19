@@ -701,6 +701,30 @@ def _task_proxy(task: Task) -> str:
     return str(task.proxy or (task.egress or {}).get("proxy") or "")
 
 
+def _working_proxies(exclude: str = "", limit: int = 2) -> list[str]:
+    """Proxy khác trong sổ ĐÃ TỪNG đọc được trang instructions (để dò hộ khi proxy chính lỗi).
+
+    Vì sao cần: sổ ghim 1 proxy cho mỗi link, mà một proxy có thể hỏng TLS tới
+    `payments.stripe.com` (đo thật 19/10: link của t4077 đọc được `succeeded` qua 3 proxy khác
+    và đọc trực tiếp, nhưng SSLError qua đúng proxy đã ghim -> chip đứng ở "Not verified yet").
+    """
+    _ledger_load()
+    now = time.time()
+    with _LINK_LEDGER_LOCK:
+        entries = [dict(v) for v in _LINK_LEDGER.values()]
+    out: list[str] = []
+    for entry in entries:
+        proxy = str(entry.get("proxy") or "")
+        ok_at = float(entry.get("proxy_ok_at") or 0)
+        if not proxy or proxy == exclude or (now - ok_at) > 6 * 3600:
+            continue
+        if proxy not in out:
+            out.append(proxy)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _monitor_one(entry: dict) -> None:
     """Dò 1 link trong sổ: cập nhật sổ + (nếu job còn trong RAM) cập nhật Task và báo UI."""
     link = str(entry.get("link") or "")
@@ -712,6 +736,17 @@ def _monitor_one(entry: dict) -> None:
     probe = artifact_probe.probe(link, fresh=True, proxy=proxy)
     now = int(time.time())
     fields: dict = {"checked_at": now, "first_seen": first_seen or now}
+    used_proxy = proxy
+    if not probe.get("ok") and artifact_probe.is_inconclusive(str(probe.get("error") or "")):
+        # Proxy ghim có thể hỏng TLS riêng với payments.stripe.com -> thử 2 proxy khác đã từng
+        # đọc được. Thành công thì đổi luôn proxy của entry (lần sau khỏi lỗi lại).
+        for alt in _working_proxies(exclude=proxy, limit=2):
+            alt_probe = artifact_probe.probe(link, fresh=True, proxy=alt)
+            if alt_probe.get("ok"):
+                probe, used_proxy = alt_probe, alt
+                break
+    if probe.get("ok"):
+        fields["proxy_ok_at"] = now
     if not probe.get("ok"):
         err = str(probe.get("error") or "")
         if artifact_probe.is_inconclusive(err):
@@ -728,7 +763,7 @@ def _monitor_one(entry: dict) -> None:
 
     fields.update({"state": new_state, "fam": fam, "zero": zero, "note": note,
                    "flip_at": int(entry.get("flip_at") or 0) or now})
-    link_watch_upsert(job_id, task_id, link, proxy, **fields)
+    link_watch_upsert(job_id, task_id, link, used_proxy, **fields)
     _ledger_save()
 
     job = _JOBS.get(job_id)

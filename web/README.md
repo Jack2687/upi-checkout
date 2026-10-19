@@ -300,6 +300,11 @@ Nay:
 
 * `artifact_probe.probe()` **thử lại 3 lần** khi lỗi mạng (SSLError/timeout/proxy) với backoff
   ngắn, thay vì để chip treo tới lượt dò sau.
+* Nếu vẫn lỗi: vòng dò **thử hộ bằng 2 proxy khác** đã từng đọc được link (`_working_proxies`),
+  và **đổi luôn proxy ghim trong sổ** sang proxy đọc được. Đo thật 19/10 (task `t4077`,
+  job `987dc3b8d9d7`): proxy ghim lỗi `SSLError` tới `payments.stripe.com`, nhưng qua 3 proxy
+  khác (và đọc trực tiếp) trang trả `succeeded` — tức khách ĐÃ duyệt mà UI đứng ở
+  "Not verified yet" chỉ vì một proxy hỏng.
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
