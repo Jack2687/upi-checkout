@@ -20,6 +20,7 @@ import queue
 import random
 import re
 import secrets
+import shutil
 import sys
 import threading
 import time
@@ -249,6 +250,9 @@ class Job:
         self.order: list[str] = []
         # Lý do dừng: chỉ do người dùng bấm Stop (đã bỏ circuit breaker tự dừng).
         self.stop_reason = ""
+        # Lỗi ghi results.json (đĩa đầy/quyền) — hiện lên UI thay vì im lặng.
+        self.write_error = ""
+        self._last_write_warn = 0.0
         self.risk_decline_count = 0
         self.promo_not_eligible_count = 0
         self.status = "running"           # running | done | stopped
@@ -354,8 +358,22 @@ class Job:
                                  "total": self.total, "done": self.done, "ok": self.ok,
                                  "fail": self.fail, "started_at": self.started_at})
                 self._last_checkpoint = now
-            except OSError:
-                pass
+            except OSError as exc:
+                # TRƯỚC ĐÂY: `pass` -> đĩa đầy mà không ai biết, desk chạy tiếp và TOÀN BỘ kết
+                # quả sau checkpoint cuối chỉ nằm trong RAM (đo thật 19/10: job 1de13e494e07
+                # đĩa đầy từ 22:46, flow log ghi 2.717 task xong nhưng results.json kẹt ở 1.372).
+                self.write_error = f"{type(exc).__name__}: {exc}"
+                now_s = time.monotonic()
+                if now_s - self._last_write_warn > 30:
+                    self._last_write_warn = now_s
+                    msg = (f"KHÔNG ghi được {self.results_path.name} ({self.write_error}) — "
+                           f"kết quả chỉ còn trong RAM, hãy dọn đĩa (./clean_logs.sh --apply)")
+                    self.log_line(f"[{self.job_id}] {msg}")
+                    self.emit({"type": "log", "task_id": "*", "line": msg})
+                    try:
+                        print(f"[write-results] {msg}", flush=True)
+                    except Exception:  # noqa: BLE001
+                        pass
 
     def close_log(self) -> None:
         with self._log_lock:
@@ -430,6 +448,7 @@ class Job:
             "fail": sum(t["status"] == "fail" for t in tasks),
             "running": sum(t["status"] == "running" for t in tasks),
             "queued": sum(t["status"] == "pending" for t in tasks),
+            "write_error": self.write_error,
             "elapsed_ms": int((time.time() - self._t0) * 1000) if self.status == "running" else self.duration_ms,
             "status": self.status,
             "stop_requested": self.stop_requested,
@@ -2292,6 +2311,28 @@ def _enqueue_tasks(job: Job, tasks: list[Task]) -> None:
 
 
 # ---------------------------------------------------------------- public API
+def _require_disk_space(tasks: int) -> None:
+    """Chặn chạy job khi đĩa gần đầy.
+
+    Vì sao: 19/10 đĩa nghẽn (cs_state 360k file + logs 3,2 GB) làm desk ghi results thất bại
+    suốt 35 phút mà không báo gì; khi process dừng thì mất 1.345 task kết quả. Snapshot của
+    một job 5.000 acc ~ 11-24 MB, checkpoint vài giây/lần, nên cần dư địa thật.
+    Đặt UPI_MIN_FREE_MB=0 để tắt kiểm tra.
+    """
+    need_mb = int(os.environ.get("UPI_MIN_FREE_MB") or 1024)
+    if need_mb <= 0:
+        return
+    try:
+        usage = shutil.disk_usage(str(ROOT))
+    except OSError:
+        return
+    free_mb = usage.free / (1024 * 1024)
+    if free_mb < need_mb:
+        raise ValueError(
+            f"đĩa chỉ còn {free_mb:.0f} MB (cần ≥ {need_mb} MB) — dọn trước: "
+            f"./clean_logs.sh --apply (flow log cũ + cs_state của job cũ), rồi chạy lại")
+
+
 def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: int,
               proxies: str | None, retries: int = 1, mix: bool = False,
               filter_proxies: bool = True, stripe_telemetry: bool = False,
@@ -2308,6 +2349,7 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
     if mode not in ("auto", "oaics", "cs"):
         raise ValueError("invalid mode")
 
+    _require_disk_space(len(tokens))
     STATE_DIR.mkdir(exist_ok=True)
     job_id = secrets.token_hex(6)
     proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens), mix,
