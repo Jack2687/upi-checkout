@@ -350,6 +350,9 @@ class Job:
                 temp.write_text(json.dumps(self.snapshot(), ensure_ascii=False,
                                            separators=(",", ":")), encoding="utf-8")
                 temp.replace(self.results_path)
+                _write_headline({"job_id": self.job_id, "status": self.status,
+                                 "total": self.total, "done": self.done, "ok": self.ok,
+                                 "fail": self.fail, "started_at": self.started_at})
                 self._last_checkpoint = now
             except OSError:
                 pass
@@ -462,7 +465,36 @@ _JOB_ORDER: list[str] = []
 _JOBS_LOCK = threading.Lock()
 
 
+_SNAPSHOT_CACHE: dict[str, tuple[float, dict]] = {}
+_SNAPSHOT_CACHE_LOCK = threading.RLock()
+SNAPSHOT_CACHE_SECS = float(os.environ.get("UPI_SNAPSHOT_CACHE_SECS") or 2.0)
+
+
 def get_job_overlay(job_id: str) -> dict | None:
+    """Snapshot của job đang trong RAM (đã trộn trạng thái link), CACHE 2 giây.
+
+    Vì sao cache: UI poll `/api/state` vài giây một lần; mỗi lần dựng snapshot cho 5.400 task
+    (deepcopy + to_dict) ngốn CPU trong khi 300 worker đang chạy -> API timeout, UI hiện "0 job".
+    2 giây trễ không ảnh hưởng gì với dữ liệu này (task chạy hàng chục giây).
+    """
+    now = time.monotonic()
+    with _SNAPSHOT_CACHE_LOCK:
+        hit = _SNAPSHOT_CACHE.get(job_id)
+        if hit and (now - hit[0]) < SNAPSHOT_CACHE_SECS:
+            return deepcopy(hit[1])
+    job = _JOBS.get(job_id)
+    if job is None:
+        return None
+    payload = link_watch_overlay(job.snapshot())
+    with _SNAPSHOT_CACHE_LOCK:
+        _SNAPSHOT_CACHE[job_id] = (now, payload)
+        if len(_SNAPSHOT_CACHE) > 64:
+            for key in list(_SNAPSHOT_CACHE)[:16]:
+                _SNAPSHOT_CACHE.pop(key, None)
+    return deepcopy(payload)
+
+
+
     """Snapshot của job đang trong RAM, đã trộn trạng thái link từ sổ."""
     job = _JOBS.get(job_id)
     if job is None:
@@ -613,14 +645,25 @@ def backfill_link_watch_from_disk(max_age_hours: float = 48.0) -> int:
         files = sorted(LOG_DIR.glob("web_*_results.json"))
     except OSError:
         return 0
+    # Giới hạn: snapshot lớn nhất đo được 24 MB, 354 file = 1,67 GB -> parse hết lúc khởi động
+    # là treo process (GIL) vài phút. Chỉ đọc file nhỏ/mới, tối đa 10 file, nhường GIL giữa các
+    # file. Link của job lớn vẫn được nạp bù khi mở job đó (`get_saved_snapshot`).
+    max_files = int(os.environ.get("UPI_LINK_BACKFILL_FILES") or 10)
+    max_bytes = int(os.environ.get("UPI_LINK_BACKFILL_MAX_BYTES") or 4 * 1024 * 1024)
+    done = 0
     for path in files:
+        if done >= max_files:
+            break
         try:
-            if path.stat().st_mtime < cutoff:
+            stat = path.stat()
+            if stat.st_mtime < cutoff or stat.st_size > max_bytes:
                 continue
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         total += backfill_link_watch(data)
+        done += 1
+        time.sleep(0)
     return total
 
 
@@ -1042,7 +1085,7 @@ def remove_task(job_id: str, task_id: str) -> dict:
     return {"ok": True, "removed": 1, "total": len(kept)}
 
 
-def get_saved_snapshot(job_id: str) -> dict | None:
+def get_saved_snapshot(job_id: str, *, backfill: bool = True) -> dict | None:
     if len(job_id) != 12 or any(c not in "0123456789abcdef" for c in job_id.lower()):
         return None
     path = LOG_DIR / f"web_{job_id}_results.json"
@@ -1055,7 +1098,8 @@ def get_saved_snapshot(job_id: str) -> dict | None:
     # Trạng thái link mới nhất nằm ở sổ theo dõi (xem link_watch_overlay) — job cũ vẫn phải
     # hiện đúng "khách đã duyệt / hết hạn" chứ không đứng im ở "Awaiting payment".
     link_watch_overlay(data)
-    backfill_link_watch(data)
+    if backfill:
+        backfill_link_watch(data)
     # A saved running job without an owner was interrupted by server exit.
     # Never silently resume payment work or show phantom running workers.
     if job_id not in _JOBS and data.get("status") == "running":
@@ -1070,6 +1114,41 @@ def get_saved_snapshot(job_id: str) -> dict | None:
     return data
 
 
+HEADLINE_SUFFIX = "_headline.json"
+HEADLINE_KEYS = ("job_id", "status", "total", "done", "ok", "fail", "started_at")
+# Snapshot lớn nhất đo được 24 MB; `/api/jobs` cũ parse tới 20 file như vậy MỖI lần gọi
+# (1,67 GB trong logs/) -> >65s, UI hiện "0 job" và "Loading...". Nay đọc headline ~300 byte.
+HEADLINE_MAX_BYTES = 4096
+
+
+def _headline_path(job_id: str) -> Path:
+    return LOG_DIR / f"web_{job_id}{HEADLINE_SUFFIX}"
+
+
+def _write_headline(headline: dict) -> None:
+    try:
+        job_id = str(headline.get("job_id") or "")
+        if not job_id:
+            return
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        temp = _headline_path(job_id).with_suffix(".json.tmp")
+        temp.write_text(json.dumps({k: headline.get(k) for k in HEADLINE_KEYS},
+                                   ensure_ascii=False), encoding="utf-8")
+        temp.replace(_headline_path(job_id))
+    except OSError:
+        pass
+
+
+def _read_headline(path: Path) -> dict | None:
+    try:
+        if path.stat().st_size > HEADLINE_MAX_BYTES:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) and data.get("job_id") else None
+
+
 def list_jobs() -> list[dict]:
     out = []
     seen = set()
@@ -1082,19 +1161,45 @@ def list_jobs() -> list[dict]:
                         "started_at": j.started_at})
             seen.add(j.job_id)
     try:
-        result_files = sorted(LOG_DIR.glob("web_*_results.json"),
-                              key=lambda p: p.stat().st_mtime, reverse=True)
+        headline_files = sorted(LOG_DIR.glob(f"web_*{HEADLINE_SUFFIX}"),
+                                key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
-        result_files = []
-    for path in result_files:
-        snapshot = get_saved_snapshot(path.name[4:-13])
-        if not snapshot or snapshot.get("job_id") in seen:
+        headline_files = []
+    # Sắp theo `started_at` (KHÔNG theo mtime file headline: file headline vừa được tạo hàng loạt
+    # nên mtime không nói gì về thứ tự job).
+    disk: list[dict] = []
+    for path in headline_files:
+        headline = _read_headline(path)
+        if not headline or headline.get("job_id") in seen:
             continue
-        out.append({key: snapshot.get(key) for key in
-                    ("job_id", "status", "total", "done", "ok", "fail", "started_at")})
-        seen.add(snapshot.get("job_id"))
-        if len(out) >= MAX_JOBS:
-            break
+        disk.append({key: headline.get(key) for key in HEADLINE_KEYS})
+        seen.add(headline.get("job_id"))
+    disk.sort(key=lambda job: str(job.get("started_at") or ""), reverse=True)
+    for job in disk[:max(0, MAX_JOBS - len(out))]:
+        # Job "running" mà không còn trong RAM = server đã restart -> thực tế đã dừng. Trước đây
+        # `/api/state` sửa trạng thái này còn danh sách thì không, nên history hiện job chạy mãi.
+        out.append(dict(job, status="stopped") if job.get("status") == "running" else job)
+    if len(out) < MAX_JOBS:
+        # Job cũ chưa có headline (tạo trước bản này): chỉ khi đó mới parse snapshot, và chỉ
+        # để LẤY HEADER rồi ghi luôn headline cho lần sau — không backfill link ở đây.
+        try:
+            result_files = sorted(LOG_DIR.glob("web_*_results.json"),
+                                  key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            result_files = []
+        for path in result_files:
+            if len(out) >= MAX_JOBS:
+                break
+            job_id = path.name[4:-13]
+            if job_id in seen:
+                continue
+            snapshot = get_saved_snapshot(job_id, backfill=False)
+            if not snapshot or snapshot.get("job_id") in seen:
+                continue
+            headline = {key: snapshot.get(key) for key in HEADLINE_KEYS}
+            _write_headline(headline)
+            out.append(headline)
+            seen.add(snapshot.get("job_id"))
     return out[:MAX_JOBS]
 
 
