@@ -416,7 +416,13 @@ function setChip(t) {
   // Chip ở hàng chân card (chế độ lưới) thì nói thẳng TRẠNG THÁI LINK — trùng ý với
   // chip hàng nên chỉ hiện ở chế độ lưới (CSS ẩn ở danh sách).
   if (t.el.footState) {
-    const [stateLabel, stateCls] = CHIP_STATE[t.linkState || ''] || ['Link created', cls];
+    // Link ĐÃ có nhưng chưa dò ra trạng thái (SSLError/proxy/timeout) khác hẳn "chưa thanh
+    // toán": trước đây cả hai đều hiện "Link created" nên tưởng task không làm gì.
+    const unverified = !t.linkState && /unverified|SSLError|Timeout|ProxyError|unreachable/i
+      .test(String(t.error || ''));
+    const [stateLabel, stateCls] = unverified
+      ? ['Not verified yet', 'chip-gray']
+      : (CHIP_STATE[t.linkState || ''] || ['Link created', cls]);
     // Kèm tuổi lần dò gần nhất: uỷ nhiệm ₹0 có thể được khách duyệt muộn, chip "Awaiting
     // payment" không đổi không có nghĩa là kẹt — nhưng phải thấy nó vẫn đang được dò.
     const age = linkCheckedAge(t.linkCheckedAt);
@@ -425,9 +431,11 @@ function setChip(t) {
     // Chip chỉ đổi khi TRẠNG THÁI đổi; thêm mốc "vừa dò" để biết server còn theo dõi link
     // (uỷ nhiệm ₹0 có thể được khách duyệt muộn, không phải kẹt).
     if (t.el.footState.parentElement) {
-      t.el.footState.parentElement.title = t.linkCheckedAt
-        ? 'link checked ' + new Date(t.linkCheckedAt * 1000).toLocaleString()
-        : 'link chưa được dò lần nào';
+      t.el.footState.parentElement.title = unverified
+        ? 'chưa dò được trang instructions: ' + String(t.error || '').slice(0, 160)
+        : (t.linkCheckedAt
+          ? 'link checked ' + new Date(t.linkCheckedAt * 1000).toLocaleString()
+          : 'link chưa được dò lần nào');
     }
   }
 }

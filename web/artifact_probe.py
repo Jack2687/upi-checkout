@@ -214,13 +214,26 @@ def probe(url: str, fresh: bool = False, proxy: str = "") -> dict:
 
     result: dict = {"ok": False, "error": "unreachable"}
     try:
-        response = requests.get(
-            target, timeout=TIMEOUT,
-            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-                     "User-Agent": _UA,
-                     "Cache-Control": "no-cache"},
-            proxies=({"http": proxy, "https": proxy} if proxy else None),
-        )
+        # Lỗi MẠNG (SSLError / timeout / proxy) là tạm thời: thử lại ngay 2 lần nữa thay vì để
+        # chip chờ lượt dò sau. Đo thật: link của task `t16` bị "link unverified (SSLError)"
+        # ngay lúc task xong -> UI hiện "Link created" (chưa kết luận) tới lượt dò kế tiếp.
+        response = None
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = requests.get(
+                    target, timeout=TIMEOUT,
+                    headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                             "User-Agent": _UA,
+                             "Cache-Control": "no-cache"},
+                    proxies=({"http": proxy, "https": proxy} if proxy else None),
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 — thử lại rồi mới báo
+                last_exc = exc
+                time.sleep(0.4 + attempt * 0.6)
+        if response is None:
+            raise last_exc or RuntimeError("unreachable")
         if response.status_code >= 400:
             result = {"ok": False, "error": "http_%s" % response.status_code}
         else:

@@ -280,6 +280,29 @@ python3 dumps_to_har.py dumps --summary           # thống kê theo host/status
 **Cảnh báo:** vì header không bị che nên file dump chứa **access token thật**. `dumps/` đã nằm
 trong `.gitignore` — đừng commit, đừng copy ra ngoài repo.
 
+## Link hiện "Link created" / "Not verified yet" — khác "Awaiting payment"
+
+Chip trạng thái link có 3 mức khác nhau, đừng nhầm:
+
+| Chip | Nghĩa |
+|---|---|
+| **Awaiting payment · 4m** | đã đọc được trang instructions: `intent_state=requires_action` → uỷ nhiệm đã tạo, khách **chưa** quét |
+| **Not verified yet** (xám) | **chưa đọc được** trang để kết luận (SSLError/timeout/proxy) — link có thật nhưng trạng thái chưa biết |
+| **Payment successful** | khách đã quét/duyệt (`succeeded`); dò Plus chạy ngay sau đó |
+
+Đo thật trên job `28371763d2de`, task `t16` (card đầu tiên trong Tasks): lúc task xong, bước
+verify link gặp `SSLError` (proxy TLS tới `payments.stripe.com`) → flow ghi
+`link unverified (SSLError)`, trạng thái để trống → chip rơi về nhánh mặc định và hiện
+"Link created". Vòng dò nền sau đó đọc được: lần đầu `waiting` (khách chưa quét), **2 phút sau
+thành `succeeded`** — tức khách đã duyệt, chỉ là UI chưa kịp hiện.
+
+Nay:
+
+* `artifact_probe.probe()` **thử lại 3 lần** khi lỗi mạng (SSLError/timeout/proxy) với backoff
+  ngắn, thay vì để chip treo tới lượt dò sau.
+* UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
+  "Link created"/"Awaiting payment".
+
 ## Vòng dò link: "Awaiting payment" không được đứng im
 
 Chip "Awaiting payment" = trang instructions trả `intent_state=requires_action`, tức uỷ nhiệm
